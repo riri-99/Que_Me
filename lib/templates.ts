@@ -17,6 +17,419 @@ export interface QueryTemplate {
 }
 
 export const QUERY_TEMPLATES: QueryTemplate[] = [
+  // =================================================================
+  // GIST TEMPLATES: ACCOUNT MAINTENANCE & EXECUTION AUDIT
+  // =================================================================
+  {
+    id: 'remove-demo-live-accounts',
+    category: 'Compliance',
+    title: 'Remove the word "demo" from all live accounts',
+    description: 'Updates TradingAccount records by regex-stripping the word "demo" and redundant whitespace from all live account names.',
+    tables: ['TradingAccount'],
+    indexes: ['TradingAccount_type_idx', 'TradingAccount_name_idx'],
+    sensitivity: 'High (Security/PII)',
+    diagnosticNotes: [
+      'Executes regex replacement with word boundary check \\ydemo\\y case-insensitively.',
+      'Cleans redundant whitespace with TRIM and REGEXP_REPLACE(\\s+, " ").',
+      'Only updates records with "type" = "LIVE" containing "demo".'
+    ],
+    generateSql: () => {
+      return `-- =====================================================================
+-- Scenario: Remove the word "demo" from all the live accounts
+-- Target: TradingAccount (type = 'LIVE' and name ILIKE '%demo%')
+-- =====================================================================
+
+UPDATE "TradingAccount"
+    SET
+        "name" = TRIM(
+            REGEXP_REPLACE(
+                REGEXP_REPLACE("name", '\\ydemo\\y', '', 'gi'),
+                '\\s+', ' ', 'g'
+            )
+        ),
+        "updatedAt" = NOW()
+    WHERE "type" = 'LIVE'
+      AND "name" ILIKE '%demo%';`;
+    }
+  },
+  {
+    id: 'orders-closed-sl-tp',
+    category: 'Trading',
+    title: 'Orders Closed by Exit Triggers (SL/TP)',
+    description: 'Identifies all orders closed by Stop Loss or Take Profit execution price sources and exit reasons.',
+    tables: ['TradingAccount', 'Order'],
+    indexes: ['TradingAccount_login_key', 'Order_accountId_idx', 'Order_filledAt_idx'],
+    sensitivity: 'Medium',
+    diagnosticNotes: [
+      'Filters by priceSource in (SL_TRIGGER, TP_TRIGGER) or order reason in (SL, TP).',
+      'Audits closingOrderId, orderType, filledQuantity, and executed price (averagePrice).'
+    ],
+    generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 130599);
+      const dateClause = dateMode === 'single'
+        ? (parameterized ? 'o."filledAt"::date = :startDate::date' : `o."filledAt"::date = '${startDate}'::date`)
+        : (parameterized 
+            ? 'o."filledAt" >= :startDate::timestamp AND o."filledAt" <= :endDate::timestamp' 
+            : `o."filledAt" >= '${startDate} 00:00:00' AND o."filledAt" <= '${endDate || startDate} 23:59:59'`);
+
+      return `-- =====================================================================
+-- Scenario: Orders Closed by Exit Triggers (SL/TP)
+-- Target: TradingAccount login = ${loginVal}
+-- =====================================================================
+
+SELECT
+    ta."login"           AS "accountLogin",
+    o."id"               AS "closingOrderId",
+    o."orderType",
+    o."executionType",
+    o."priceSource",     -- 'SL_TRIGGER', 'TP_TRIGGER'
+    o."reason",          -- 'SL', 'TP'
+    o."referencePositionId",
+    o."filledQuantity",
+    o."averagePrice"     AS "executedPrice",
+    o."filledAt"
+FROM "TradingAccount" ta
+JOIN "Order" o
+    ON o."accountId" = ta."id"
+WHERE ta."login" = ${loginVal}
+  AND (
+      o."reason" IN ('SL', 'TP')
+      OR o."orderType" IN ('STOP_LOSS', 'TAKE_PROFIT')
+      OR o."priceSource" IN ('SL_TRIGGER', 'TP_TRIGGER')
+  )
+  AND o."status" = 'FILLED'
+  AND ${dateClause}
+ORDER BY o."filledAt" DESC;`;
+    }
+  },
+  {
+    id: 'market-execution-orders',
+    category: 'Trading',
+    title: 'Market Execution Orders & Position Audit',
+    description: 'Audits market execution orders, linked position execution prices, close reasons, and realized PnL.',
+    tables: ['TradingAccount', 'Order', 'Position', 'Instrument'],
+    indexes: ['TradingAccount_login_key', 'Order_accountId_idx', 'Position_openedByOrderId_idx', 'Position_closedAt_idx'],
+    sensitivity: 'Medium',
+    diagnosticNotes: [
+      'Filters for executionType = MARKET or standard BUY/SELL order types.',
+      'Joins Position on openedByOrderId to track openPrice, closePrice, closeReason, and realizedPnl.'
+    ],
+    generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 130599);
+      const dateClause = dateMode === 'single'
+        ? (parameterized ? 'p."closedAt"::date = :startDate::date' : `p."closedAt"::date = '${startDate}'::date`)
+        : (parameterized 
+            ? 'p."closedAt" >= :startDate::timestamp AND p."closedAt" <= :endDate::timestamp' 
+            : `p."closedAt" >= '${startDate} 00:00:00' AND p."closedAt" <= '${endDate || startDate} 23:59:59'`);
+
+      return `-- =====================================================================
+-- Scenario: Market Execution Orders & Position Realized PnL
+-- Target: TradingAccount login = ${loginVal}
+-- =====================================================================
+
+SELECT
+    ta."login"                 AS "accountLogin",
+    o."id"                     AS "orderId",
+    COALESCE(i."symbol", o."externalSymbol") AS "symbol",
+    o."orderType",
+    o."executionType",
+    o."quantity"               AS "orderedQuantity",
+    o."averagePrice"           AS "executedOrderPrice",
+    o."sl"                     AS "orderStopLoss",
+    o."tp"                     AS "orderTakeProfit",
+    o."filledAt"               AS "orderFilledAt",
+    p."id"                     AS "positionId",
+    p."openPrice"              AS "positionOpenPrice",
+    p."closePrice"             AS "closeExecutionPrice",
+    p."closeReason"            AS "closeReason", -- USER, SL, TP, STOP_OUT, etc.
+    p."closedAt"               AS "positionClosedAt",
+    p."closedPnl"              AS "realizedPnl"
+FROM "TradingAccount" ta
+JOIN "Order" o
+    ON o."accountId" = ta."id"
+JOIN "Position" p
+    ON p."openedByOrderId" = o."id"
+    AND p."accountId" = ta."id"
+LEFT JOIN "Instrument" i
+    ON i."id" = o."instrumentId"
+WHERE ta."login" = ${loginVal}
+  AND (
+      o."executionType" = 'MARKET'
+      OR (o."executionType" IS NULL AND o."orderType" IN ('BUY', 'SELL'))
+  )
+  AND ${dateClause}
+ORDER BY p."closedAt" DESC;`;
+    }
+  },
+  {
+    id: 'limit-orders-audit',
+    category: 'Trading',
+    title: 'Limit Orders & Position Execution Audit',
+    description: 'Examines pending and executed limit orders, requested limit price vs executed price, and position outcomes.',
+    tables: ['TradingAccount', 'Order', 'Position', 'Instrument'],
+    indexes: ['TradingAccount_login_key', 'Order_accountId_idx', 'Position_openedByOrderId_idx'],
+    sensitivity: 'Medium',
+    diagnosticNotes: [
+      'Filters for executionType = LIMIT or orderType in (BUY_LIMIT, SELL_LIMIT).',
+      'Audits limitPrice vs averagePrice to detect positive or negative execution delta.'
+    ],
+    generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 130599);
+      const dateClause = dateMode === 'single'
+        ? (parameterized ? 'p."closedAt"::date = :startDate::date' : `p."closedAt"::date = '${startDate}'::date`)
+        : (parameterized 
+            ? 'p."closedAt" >= :startDate::timestamp AND p."closedAt" <= :endDate::timestamp' 
+            : `p."closedAt" >= '${startDate} 00:00:00' AND p."closedAt" <= '${endDate || startDate} 23:59:59'`);
+
+      return `-- =====================================================================
+-- Scenario: Limit Orders & Position Execution Audit
+-- Target: TradingAccount login = ${loginVal}
+-- =====================================================================
+
+SELECT
+    ta."login"                 AS "accountLogin",
+    o."id"                     AS "orderId",
+    COALESCE(i."symbol", o."externalSymbol") AS "symbol",
+    o."orderType",
+    o."executionType",
+    o."quantity"               AS "orderedQuantity",
+    o."price"                  AS "limitPrice",
+    o."averagePrice"           AS "executedOrderPrice",
+    o."sl"                     AS "orderStopLoss",
+    o."tp"                     AS "orderTakeProfit",
+    o."filledAt"               AS "orderFilledAt",
+    p."id"                     AS "positionId",
+    p."openPrice"              AS "positionOpenPrice",
+    p."closePrice"             AS "closeExecutionPrice",
+    p."closeReason"            AS "closeReason",
+    p."closedAt"               AS "positionClosedAt",
+    p."closedPnl"              AS "realizedPnl"
+FROM "TradingAccount" ta
+JOIN "Order" o
+    ON o."accountId" = ta."id"
+JOIN "Position" p
+    ON p."openedByOrderId" = o."id"
+    AND p."accountId" = ta."id"
+LEFT JOIN "Instrument" i
+    ON i."id" = o."instrumentId"
+WHERE ta."login" = ${loginVal}
+  AND (
+      o."executionType" = 'LIMIT'
+      OR o."orderType" IN ('BUY_LIMIT', 'SELL_LIMIT')
+  )
+  AND ${dateClause}
+ORDER BY p."closedAt" DESC;`;
+    }
+  },
+  {
+    id: 'stop-limit-orders-audit',
+    category: 'Trading',
+    title: 'Stop Limit Orders & Trigger Audit',
+    description: 'Audits stop-limit orders including stopTriggerPrice, stopLimitPrice, executedOrderPrice, and position PnL.',
+    tables: ['TradingAccount', 'Order', 'Position', 'Instrument'],
+    indexes: ['TradingAccount_login_key', 'Order_accountId_idx', 'Position_openedByOrderId_idx'],
+    sensitivity: 'Medium',
+    diagnosticNotes: [
+      'Filters for executionType = STOP_LIMIT or orderType in (BUY_STOP_LIMIT, SELL_STOP_LIMIT).',
+      'Inspects stopTriggerPrice vs limitPrice and execution latency.'
+    ],
+    generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 130599);
+      const dateClause = dateMode === 'single'
+        ? (parameterized ? 'p."closedAt"::date = :startDate::date' : `p."closedAt"::date = '${startDate}'::date`)
+        : (parameterized 
+            ? 'p."closedAt" >= :startDate::timestamp AND p."closedAt" <= :endDate::timestamp' 
+            : `p."closedAt" >= '${startDate} 00:00:00' AND p."closedAt" <= '${endDate || startDate} 23:59:59'`);
+
+      return `-- =====================================================================
+-- Scenario: Stop Limit Orders & Trigger Audit
+-- Target: TradingAccount login = ${loginVal}
+-- =====================================================================
+
+SELECT
+    ta."login"                 AS "accountLogin",
+    o."id"                     AS "orderId",
+    COALESCE(i."symbol", o."externalSymbol") AS "symbol",
+    o."orderType",
+    o."executionType",
+    o."quantity"               AS "orderedQuantity",
+    o."triggerPrice"           AS "stopTriggerPrice",
+    o."stopLimitPrice"         AS "limitPrice",
+    o."averagePrice"           AS "executedOrderPrice",
+    o."sl"                     AS "orderStopLoss",
+    o."tp"                     AS "orderTakeProfit",
+    o."filledAt"               AS "orderFilledAt",
+    p."id"                     AS "positionId",
+    p."openPrice"              AS "positionOpenPrice",
+    p."closePrice"             AS "closeExecutionPrice",
+    p."closeReason"            AS "closeReason",
+    p."closedAt"               AS "positionClosedAt",
+    p."closedPnl"              AS "realizedPnl"
+FROM "TradingAccount" ta
+JOIN "Order" o
+    ON o."accountId" = ta."id"
+JOIN "Position" p
+    ON p."openedByOrderId" = o."id"
+    AND p."accountId" = ta."id"
+LEFT JOIN "Instrument" i
+    ON i."id" = o."instrumentId"
+WHERE ta."login" = ${loginVal}
+  AND (
+      o."executionType" = 'STOP_LIMIT'
+      OR o."orderType" IN ('BUY_STOP_LIMIT', 'SELL_STOP_LIMIT')
+  )
+  AND ${dateClause}
+ORDER BY p."closedAt" DESC;`;
+    }
+  },
+  {
+    id: 'find-transaction-deal-footprint',
+    category: 'Funds',
+    title: 'Find Balance Transaction & Deal Footprint',
+    description: 'Locates FundTransaction details, linked balance/credit deals, positions, and ledger entries for an account.',
+    tables: ['FundTransaction', 'TradingAccount', 'Deal'],
+    indexes: ['FundTransaction_accountId_idx', 'Deal_accountId_idx', 'TradingAccount_login_key'],
+    sensitivity: 'High (Financial)',
+    diagnosticNotes: [
+      'Joins FundTransaction to Deal where dealType in (BALANCE, CREDIT, CHARGE, CORRECTION, BONUS).',
+      'Correlates deal profit with fund transaction amount within a 10-second epoch window.'
+    ],
+    generateSql: ({ loginId, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 123456);
+      return `-- =====================================================================
+-- Scenario: Find FundTransaction & Linked Deal Footprint
+-- Target: TradingAccount login = ${loginVal}
+-- =====================================================================
+
+SELECT
+    ft.id AS "fundTransactionId",
+    ft."accountId",
+    ta.login,
+    ft.amount,
+    ft."operationType",
+    ft."transactionType",
+    ft."staffId",
+    ft."ledgerTransactionId",
+    ft."createdAt",
+    d.id AS "dealId",
+    d."positionId"
+FROM "FundTransaction" ft
+JOIN "TradingAccount" ta ON ta.id = ft."accountId"
+LEFT JOIN "Deal" d ON d."accountId" = ft."accountId"
+    AND d."dealType"::text IN ('BALANCE', 'CREDIT', 'CHARGE', 'CORRECTION', 'BONUS')
+    AND d.profit = ft.amount
+    AND ABS(EXTRACT(EPOCH FROM (d."createdAt" - ft."createdAt"))) < 10
+WHERE ta.login = ${loginVal}
+ORDER BY ft."createdAt" DESC
+LIMIT 10;`;
+    }
+  },
+  {
+    id: 'atomic-balance-cleanup',
+    category: 'Funds',
+    title: 'Atomic Balance & Footprint Cleanup Script',
+    description: 'Atomic PL/pgSQL transaction script to delete linked Deal, Position, Ledger entries, and revert TradingAccount balance and StaffWallet.',
+    tables: ['FundTransaction', 'Deal', 'Position', 'LedgerEntry', 'LedgerTransaction', 'TradingAccount', 'StaffWallet'],
+    indexes: ['FundTransaction_id_key', 'Deal_id_key', 'Position_id_key'],
+    sensitivity: 'High (Financial)',
+    diagnosticNotes: [
+      'Executes within an atomic DO $$ BEGIN ... END $$; transaction block.',
+      'Cascades deletion: Deal -> Position -> LedgerEntry -> LedgerTransaction -> FundTransaction.',
+      'Reverts TradingAccount figures and refunds StaffWallet if applicable.'
+    ],
+    generateSql: ({ parameterized }) => {
+      const ftIdVal = parameterized ? ':fundTransactionId' : 'YOUR_FUND_TRANSACTION_ID';
+      return `-- =====================================================================
+-- Scenario: Atomic SQL Balance Cleanup & Reversion Script
+-- Target: FundTransaction ID = '${ftIdVal}'
+-- Caution: Run within a verified administrative session
+-- =====================================================================
+
+DO $$
+DECLARE
+    v_ft_id TEXT := '${ftIdVal}'; -- <-- Set your FundTransaction ID here
+    v_account_id TEXT;
+    v_amount NUMERIC;
+    v_staff_id TEXT;
+    v_ledger_tx_id TEXT;
+    v_op_type TEXT;
+    v_created_at TIMESTAMPTZ;
+    v_deal_id INT;
+    v_position_id INT;
+BEGIN
+    -- 1. Fetch FundTransaction details
+    SELECT "accountId", amount, "staffId", "ledgerTransactionId", "operationType"::text, "createdAt"
+    INTO v_account_id, v_amount, v_staff_id, v_ledger_tx_id, v_op_type, v_created_at
+    FROM "FundTransaction"
+    WHERE id = v_ft_id;
+
+    IF v_account_id IS NULL THEN
+        RAISE EXCEPTION 'FundTransaction with ID % not found.', v_ft_id;
+    END IF;
+
+    -- 2. Find the linked Deal and Position
+    SELECT d.id, d."positionId"
+    INTO v_deal_id, v_position_id
+    FROM "Deal" d
+    WHERE d."accountId" = v_account_id
+      AND d.profit = v_amount
+      AND d.reason::text = 'ADMIN'
+      AND d."dealType"::text IN ('BALANCE', 'CREDIT', 'CHARGE', 'CORRECTION', 'BONUS')
+      AND ABS(EXTRACT(EPOCH FROM (d."createdAt" - v_created_at))) < 10
+    ORDER BY d.id DESC
+    LIMIT 1;
+
+    -- 3. Delete Deal first (foreign key to Position)
+    IF v_deal_id IS NOT NULL THEN
+        DELETE FROM "Deal" WHERE id = v_deal_id;
+    END IF;
+
+    -- 4. Delete Position
+    IF v_position_id IS NOT NULL THEN
+        DELETE FROM "Position" WHERE id = v_position_id;
+    END IF;
+
+    -- 5. Delete Ledger entries & LedgerTransaction
+    DELETE FROM "LedgerEntry"
+    WHERE "referenceId" = v_ft_id
+       OR ("ledgerTransactionId" IS NOT NULL AND "ledgerTransactionId" = v_ledger_tx_id);
+
+    IF v_ledger_tx_id IS NOT NULL THEN
+        DELETE FROM "LedgerTransaction" WHERE id = v_ledger_tx_id;
+    END IF;
+
+    -- 6. Delete FundTransaction
+    DELETE FROM "FundTransaction" WHERE id = v_ft_id;
+
+    -- 7. Revert TradingAccount figures
+    IF v_op_type IN ('CREDIT', 'BONUS') THEN
+        UPDATE "TradingAccount"
+        SET credit = credit - v_amount,
+            equity = equity - v_amount,
+            "freeMargin" = "freeMargin" - v_amount,
+            "updatedAt" = NOW()
+        WHERE id = v_account_id;
+    ELSE
+        UPDATE "TradingAccount"
+        SET balance = balance - v_amount,
+            equity = equity - v_amount,
+            "freeMargin" = "freeMargin" - v_amount,
+            "updatedAt" = NOW()
+        WHERE id = v_account_id;
+    END IF;
+
+    -- 8. Refund StaffWallet (if this was a deposit deducted from staff balance)
+    IF v_staff_id IS NOT NULL AND v_amount > 0 AND v_op_type NOT IN ('CREDIT', 'BONUS') THEN
+        UPDATE "StaffWallet"
+        SET balance = balance + v_amount,
+            "updatedAt" = NOW()
+        WHERE "staffId" = v_staff_id;
+    END IF;
+
+    RAISE NOTICE 'Successfully removed balance entry footprint for Account ID: %, Amount: %', v_account_id, v_amount;
+END $$;`;
+    }
+  },
   // 1. TRADING & EXECUTION
   {
     id: 'slippage-analysis',
@@ -950,7 +1363,58 @@ ORDER BY ABS(p."floatingPnL") DESC;`
     };
   }
 
-  // 10. GENERAL FALLBACK AD-HOC INVESTIGATION
+  // 10. ACCOUNT NAME / DEMO / LIVE ACCOUNT CLEANUP OR INSPECTION
+  if (
+    p.includes('demo') ||
+    p.includes('name') ||
+    p.includes('rename') ||
+    p.includes('clean') ||
+    p.includes('live') ||
+    p.includes('remove')
+  ) {
+    const isLiveFilter = p.includes('live') || p.includes('active');
+    const statusClause = isLiveFilter ? `ta.status = 'ACTIVE'` : `1 = 1`;
+    const targetFilter = p.includes('all') 
+      ? (p.includes('demo') ? `${statusClause} AND ta.name ILIKE '%demo%'` : statusClause) 
+      : `${statusClause} AND (ta.login = ${loginVal} OR ta.name ILIKE '%demo%')`;
+
+    return {
+      metadata: {
+        tables: ['TradingAccount', 'User'],
+        indexes: ['TradingAccount_login_key', 'User_id_idx'],
+        sensitivity: 'Low',
+        diagnosticNotes: [
+          'Diagnostic inspection query to identify accounts matching naming criteria before making administrative updates.',
+          'proposed_cleaned_name demonstrates safe preview of string replacement using REPLACE().',
+          'Review account balances and open positions before applying bulk status or name changes.'
+        ]
+      },
+      sql: `-- =====================================================================
+-- Custom Query: Account Name & Live Status Inspection
+-- Prompt: "${prompt}"
+-- Target: TradingAccount inspection (Diagnostic Preview)
+-- =====================================================================
+
+SELECT 
+    ta.id AS account_id,
+    ta.login AS account_login,
+    ta.name AS current_name,
+    TRIM(REPLACE(REPLACE(ta.name, 'demo', ''), 'DEMO', '')) AS proposed_cleaned_name,
+    ta.status AS account_status,
+    ta.currency,
+    ta.balance,
+    ta.equity,
+    u.email AS user_email,
+    ta."createdAt" AS created_at
+FROM "TradingAccount" ta
+JOIN "User" u ON u.id = ta."userId"
+WHERE ${targetFilter}
+ORDER BY ta."createdAt" DESC
+LIMIT 100;`
+    };
+  }
+
+  // 11. GENERAL FALLBACK AD-HOC INVESTIGATION
   return {
     metadata: {
       tables: ['TradingAccount', 'Order', 'Deal', 'FundTransaction', 'AuditLog'],

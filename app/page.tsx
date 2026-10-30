@@ -36,7 +36,7 @@ export default function DashboardPage() {
   // Static initial defaults to avoid SSR prerender time skew
   const [startDate, setStartDate] = useState<string>('2026-10-23');
   const [endDate, setEndDate] = useState<string>('2026-10-30');
-  const [activeCaseId, setActiveCaseId] = useState<string>('slippage-analysis');
+  const [activeCaseId, setActiveCaseId] = useState<string>('remove-demo-live-accounts');
   const [searchReason, setSearchReason] = useState<string>('');
   const [customPrompt, setCustomPrompt] = useState<string>('Check if leverage was modified right before stop-out');
   const [parameterized, setParameterized] = useState<boolean>(false);
@@ -71,7 +71,7 @@ export default function DashboardPage() {
     const params = new URLSearchParams(window.location.search);
     
     if (params.get('login')) setLoginId(params.get('login') || '');
-    if (params.get('case')) setActiveCaseId(params.get('case') || 'slippage-analysis');
+    if (params.get('case')) setActiveCaseId(params.get('case') || 'remove-demo-live-accounts');
     if (params.get('dateMode') === 'single' || params.get('dateMode') === 'range') {
       setDateMode(params.get('dateMode') as 'single' | 'range');
     }
@@ -185,7 +185,7 @@ export default function DashboardPage() {
         diagnosticNotes: activeTemplate.diagnosticNotes
       }
     };
-  }, [activeTemplate, activeCaseId, customPrompt, loginId, dateMode, startDate, endDate, parameterized]);
+  }, [activeTemplate, activeCaseId, customPrompt, loginId, dateMode, startDate, endDate, parameterized, customQueryResult]);
 
   // Filtered list of templates in dropdown
   const filteredTemplates = useMemo(() => {
@@ -246,15 +246,18 @@ export default function DashboardPage() {
         })
       });
 
-      if (!res.ok) throw new Error(`API responded with status: ${res.status}`);
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData?.details || errData?.error || `API responded with status: ${res.status}`);
+      }
       const data = await res.json();
       setCustomQueryResult({
         sql: data.sql,
-        tables: data.tables,
-        indexes: data.indexes,
-        sensitivity: data.sensitivity,
+        tables: data.tables || ['TradingAccount'],
+        indexes: data.indexes || ['TradingAccount_login_key'],
+        sensitivity: data.sensitivity || 'Medium',
         diagnosticNotes: data.diagnosticNotes || [],
-        isAiGenerated: data.isAiGenerated,
+        isAiGenerated: data.isAiGenerated ?? true,
         aiEngine: data.aiEngine,
         notice: data.notice
       });
@@ -508,12 +511,24 @@ export default function DashboardPage() {
             style={{ padding: '26px 30px', marginBottom: '36px' }}
             className="w-full bg-slate-950 rounded-2xl border border-cyan-800/60 shadow-xl flex flex-col"
           >
-            {/* Headline Row with generous bottom spacing */}
-            <div style={{ marginBottom: '18px' }} className="flex items-center gap-2.5">
-              <Sparkles className="w-4 h-4 text-cyan-400 shrink-0" />
-              <label className="text-sm font-semibold text-cyan-300 tracking-wide">
-                Custom Prompt Here:
-              </label>
+            {/* Headline Row with status indicator */}
+            <div style={{ marginBottom: '18px' }} className="flex items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2.5">
+                <Sparkles className="w-4 h-4 text-cyan-400 shrink-0" />
+                <label className="text-sm font-semibold text-cyan-300 tracking-wide">
+                  Custom Prompt Here:
+                </label>
+              </div>
+              <div className="flex items-center gap-1.5 text-[10px] text-cyan-400/90 bg-cyan-950/80 px-2.5 py-0.5 rounded-full border border-cyan-800/60 font-mono">
+                <Zap className="w-3 h-3 text-cyan-400" />
+                <span>
+                  {isGeneratingAi
+                    ? 'Synthesizing with Groq Llama 3.3...'
+                    : customQueryResult?.isAiGenerated
+                    ? (customQueryResult.aiEngine || 'Groq Llama 3.3 AI Synthesized')
+                    : 'Groq LPU Engine Ready'}
+                </span>
+              </div>
             </div>
 
             {/* Input & Action Button Row */}
@@ -526,7 +541,10 @@ export default function DashboardPage() {
                 <input
                   type="text"
                   value={customPrompt}
-                  onChange={(e) => setCustomPrompt(e.target.value)}
+                  onChange={(e) => {
+                    setCustomPrompt(e.target.value);
+                    setCustomQueryResult(null);
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
                       e.preventDefault();
@@ -540,7 +558,10 @@ export default function DashboardPage() {
                 {customPrompt && (
                   <button
                     type="button"
-                    onClick={() => setCustomPrompt('')}
+                    onClick={() => {
+                      setCustomPrompt('');
+                      setCustomQueryResult(null);
+                    }}
                     style={{ padding: '6px', marginLeft: '8px' }}
                     className="text-slate-400 hover:text-white transition-colors shrink-0 flex items-center justify-center rounded-lg hover:bg-slate-800"
                     title="Clear prompt"
@@ -569,6 +590,33 @@ export default function DashboardPage() {
                   </>
                 )}
               </button>
+            </div>
+
+            {/* Quick Suggestion Chips */}
+            <div className="flex flex-wrap items-center gap-2 pt-3">
+              <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider mr-1">
+                Try Scenario:
+              </span>
+              {[
+                'Remove demo from all live accounts',
+                'Leverage modified right before stop-out',
+                'Cross-account IP & device sharing',
+                'Execution latency > 1s and slippage spikes',
+                'Deposit, withdrawal & UTR tracking'
+              ].map((chip) => (
+                <button
+                  key={chip}
+                  type="button"
+                  onClick={() => {
+                    setCustomPrompt(chip);
+                    setCustomQueryResult(null);
+                    handleGenerateCustomQuery(chip);
+                  }}
+                  className="text-xs px-3 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-cyan-300 border border-slate-800 hover:border-cyan-700/60 transition-all flex items-center gap-1.5"
+                >
+                  <span>{chip}</span>
+                </button>
+              ))}
             </div>
           </div>
         )}

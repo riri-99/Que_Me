@@ -132,9 +132,16 @@ SCHEMA CONTEXT (Prisma PostgreSQL models):
     - spread: Decimal
 
 STRICT RULES FOR SQL GENERATION:
-1. TARGET ACCOUNT FILTERING: The query MUST filter on the target account: ta.login = <loginVal> (where ta is "TradingAccount").
-2. READ-ONLY ENFORCEMENT: ONLY SELECT or WITH ... SELECT queries are allowed. NEVER use INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, or DDL commands.
-3. DATE FILTERING: Apply the user's date criteria:
+1. READ-ONLY DIAGNOSTIC NATURE (MANDATORY):
+   - You are exclusively a diagnostic and investigation tool for support & ops teams.
+   - You MUST ONLY generate read-only SELECT or WITH ... SELECT queries.
+   - NEVER output UPDATE, DELETE, INSERT, DROP, ALTER, TRUNCATE, or other mutation commands under any circumstance!
+   - If the user's brief asks for a modification or action (e.g. "remove demo from all live accounts", "set leverage to 500", "delete old sessions"):
+     Do NOT generate an UPDATE or DELETE statement! Instead, generate a diagnostic inspection SELECT query that identifies and previews the target rows (for example, showing current values alongside proposed replacement values using REPLACE, TRIM, or calculated expressions) so operators can safely audit the records.
+2. TARGET SCOPE & ACCOUNT FILTERING:
+   - If the user brief specifies a single target account: filter ta.login = <loginVal> (where ta is "TradingAccount").
+   - If the user brief asks about "all accounts", "all live accounts", "all users", or across accounts: filter by the requested criteria (e.g. ta.status = 'ACTIVE' or name patterns) and include a sensible LIMIT (e.g. LIMIT 100).
+3. DATE FILTERING: Apply the user's date criteria if relevant:
    - If single date: target_tbl."createdAt"::date = <dateVal>::date
    - If date range: target_tbl."createdAt" >= <fromVal> AND target_tbl."createdAt" <= <toVal>
 4. PARAMETERIZATION:
@@ -158,18 +165,38 @@ Respond with a strict JSON object (no markdown code blocks, just raw JSON):
 `;
 
 function sanitizeAndValidateSql(sql: string): { isValid: boolean; error?: string } {
-  const upper = sql.toUpperCase();
+  // 1. Strip comments (single-line and multi-line) so words in comments don't cause false positives
+  const withoutComments = sql
+    .replace(/--[^\r\n]*/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+
+  // 2. Strip string literals so 'UPDATE' inside quotes doesn't match
+  const withoutStrings = withoutComments.replace(/'(?:''|[^'])*'/g, "''");
+
+  // 3. Check for actual DDL/DML mutation keywords as standalone SQL statements/clauses
   const dangerousTokens = [
-    'DROP ', 'DELETE ', 'UPDATE ', 'INSERT ', 'ALTER ', 'TRUNCATE ', 'EXEC ', 'GRANT ', 'REVOKE ', 'CREATE '
+    /\bDROP\s+(?:TABLE|DATABASE|INDEX|VIEW|SCHEMA)\b/i,
+    /\bDELETE\s+FROM\b/i,
+    /\bUPDATE\s+["a-zA-Z_]+\s+SET\b/i,
+    /\bINSERT\s+INTO\b/i,
+    /\bALTER\s+TABLE\b/i,
+    /\bTRUNCATE\s+(?:TABLE)?\b/i,
+    /\bEXEC\s+/i,
+    /\bGRANT\s+/i,
+    /\bREVOKE\s+/i,
+    /\bCREATE\s+(?:TABLE|DATABASE|INDEX|VIEW|FUNCTION|PROCEDURE)\b/i
   ];
-  for (const token of dangerousTokens) {
-    if (upper.includes(token)) {
-      return { isValid: false, error: `Dangerous token detected in query: ${token.trim()}` };
+
+  for (const regex of dangerousTokens) {
+    if (regex.test(withoutStrings)) {
+      return { isValid: false, error: 'Dangerous mutation detected in query statement.' };
     }
   }
-  const clean = sql.trim().replace(/^--[^\n]*\n+/g, '').trim().toUpperCase();
-  if (!clean.startsWith('SELECT') && !clean.startsWith('WITH')) {
-    return { isValid: false, error: 'Query must be a read-only SELECT statement.' };
+
+  // 4. Must start with SELECT or WITH
+  const clean = withoutStrings.trim();
+  if (!clean.toUpperCase().startsWith('SELECT') && !clean.toUpperCase().startsWith('WITH')) {
+    return { isValid: false, error: 'Query must be a read-only SELECT or WITH statement.' };
   }
   return { isValid: true };
 }
