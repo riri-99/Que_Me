@@ -8,8 +8,7 @@ export interface QueryTemplate {
   sensitivity: 'Low' | 'Medium' | 'High (Financial)' | 'High (Security/PII)';
   diagnosticNotes: string[];
   generateSql: (params: {
-    loginId: string;
-    vendorId?: string;
+    loginId?: string;
     dateMode: 'single' | 'range';
     startDate: string;
     endDate?: string;
@@ -24,19 +23,16 @@ export const QUERY_TEMPLATES: QueryTemplate[] = [
     category: 'Trading',
     title: 'Order Slippage & Execution Discrepancy',
     description: 'Compares requested prices against actual execution prices on executed deals to detect slippage, execution latency, and routing performance.',
-    tables: ['TradingAccount', 'Order', 'Deal', 'VendorInstrument'],
-    indexes: ['TradingAccount_vendorId_login_key', 'Order_accountId_idx', 'Deal_orderId_idx'],
+    tables: ['TradingAccount', 'Order', 'Deal', 'Instrument'],
+    indexes: ['TradingAccount_login_key', 'Order_accountId_idx', 'Deal_orderId_idx'],
     sensitivity: 'Medium',
     diagnosticNotes: [
       'Positive slippage_points indicates execution above requested price (favorable or unfavorable depending on BUY/SELL).',
       'High latency between o."createdAt" and d."createdAt" may point to LP routing delays.',
       'Check if deal volume matches full order volume or represents a partial fill.'
     ],
-    generateSql: ({ loginId, vendorId, dateMode, startDate, endDate, parameterized }) => {
-      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 10001);
-      const vendorClause = vendorId 
-        ? (parameterized ? 'AND ta."vendorId" = :vendorId\n  ' : `AND ta."vendorId" = ${vendorId}\n  `) 
-        : '';
+    generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
       const dateClause = dateMode === 'single'
         ? (parameterized ? 'o."createdAt"::date = :startDate::date' : `o."createdAt"::date = '${startDate}'::date`)
         : (parameterized 
@@ -68,7 +64,7 @@ FROM "TradingAccount" ta
 JOIN "Order" o ON o."accountId" = ta.id
 JOIN "Deal" d ON d."orderId" = o.id
 WHERE ta.login = ${loginVal}
-  ${vendorClause}AND ${dateClause}
+  AND ${dateClause}
 ORDER BY d."createdAt" DESC;`;
     }
   },
@@ -78,18 +74,15 @@ ORDER BY d."createdAt" DESC;`;
     title: 'Rejected, Cancelled & Expired Orders',
     description: 'Finds all non-filled orders with system rejection codes, dealer cancellations, or timeout errors.',
     tables: ['TradingAccount', 'Order', 'ExecutionEvent'],
-    indexes: ['TradingAccount_vendorId_login_key', 'Order_accountId_idx', 'ExecutionEvent_orderId_idx'],
+    indexes: ['TradingAccount_login_key', 'Order_accountId_idx', 'ExecutionEvent_orderId_idx'],
     sensitivity: 'Medium',
     diagnosticNotes: [
       'ExecutionEvent logs contain internal error messages from the liquidity bridge/gateway.',
       'Common rejection causes include INSUFFICIENT_MARGIN, OFF_QUOTES, or MARKET_CLOSED.',
       'Cross-check if order was manually rejected by dealer or automated risk filter.'
     ],
-    generateSql: ({ loginId, vendorId, dateMode, startDate, endDate, parameterized }) => {
-      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 10001);
-      const vendorClause = vendorId 
-        ? (parameterized ? 'AND ta."vendorId" = :vendorId\n  ' : `AND ta."vendorId" = ${vendorId}\n  `) 
-        : '';
+    generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
       const dateClause = dateMode === 'single'
         ? (parameterized ? 'o."createdAt"::date = :startDate::date' : `o."createdAt"::date = '${startDate}'::date`)
         : (parameterized 
@@ -119,7 +112,7 @@ FROM "TradingAccount" ta
 JOIN "Order" o ON o."accountId" = ta.id
 LEFT JOIN "ExecutionEvent" ee ON ee."orderId" = o.id
 WHERE ta.login = ${loginVal}
-  ${vendorClause}AND o."orderStatus" IN ('CANCELLED', 'REJECTED', 'EXPIRED')
+  AND o."orderStatus" IN ('CANCELLED', 'REJECTED', 'EXPIRED')
   AND ${dateClause}
 ORDER BY o."createdAt" DESC;`;
     }
@@ -129,19 +122,16 @@ ORDER BY o."createdAt" DESC;`;
     category: 'Trading',
     title: 'Open Positions & Real-Time Floating PnL',
     description: 'Retrieves active open positions, floating PnL, overnight swap fees, commission charges, and margin commitments.',
-    tables: ['TradingAccount', 'Position', 'VendorInstrument'],
-    indexes: ['TradingAccount_vendorId_login_key', 'Position_accountId_idx'],
+    tables: ['TradingAccount', 'Position', 'Instrument'],
+    indexes: ['TradingAccount_login_key', 'Position_accountId_idx'],
     sensitivity: 'Medium',
     diagnosticNotes: [
       'floatingPnl represents mark-to-market unrealized profit or loss at the latest tick.',
       'Check swap and commission fees if user disputes balance reductions while holding open trades.',
       'Verify if position sl (Stop Loss) or tp (Take Profit) were properly placed.'
     ],
-    generateSql: ({ loginId, vendorId, dateMode, startDate, endDate, parameterized }) => {
-      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 10001);
-      const vendorClause = vendorId 
-        ? (parameterized ? 'AND ta."vendorId" = :vendorId\n  ' : `AND ta."vendorId" = ${vendorId}\n  `) 
-        : '';
+    generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
       const dateClause = dateMode === 'single'
         ? (parameterized ? 'p."createdAt"::date <= :startDate::date' : `p."createdAt"::date <= '${startDate}'::date`)
         : (parameterized 
@@ -172,7 +162,7 @@ SELECT
 FROM "TradingAccount" ta
 JOIN "Position" p ON p."accountId" = ta.id
 WHERE ta.login = ${loginVal}
-  ${vendorClause}AND p.volume > 0
+  AND p.volume > 0
   AND ${dateClause}
 ORDER BY p."createdAt" DESC;`;
     }
@@ -185,18 +175,15 @@ ORDER BY p."createdAt" DESC;`;
     title: 'Deposit, Withdrawal & UTR Tracking',
     description: 'Details all incoming deposits, outgoing withdrawals, bank account references, UTR numbers, and approval staff.',
     tables: ['TradingAccount', 'FundTransaction', 'Staff', 'BankAccount'],
-    indexes: ['TradingAccount_vendorId_login_key', 'FundTransaction_accountId_createdAt_idx', 'FundTransaction_utrNumber_key'],
+    indexes: ['TradingAccount_login_key', 'FundTransaction_accountId_createdAt_idx', 'FundTransaction_utrNumber_key'],
     sensitivity: 'High (Financial)',
     diagnosticNotes: [
       'Use utrNumber to cross-verify bank settlement records or payment gateway webhooks.',
       'currentBalance shows the exact account balance recorded right after this transaction settled.',
       'Check processedByStaffId to audit manual backoffice approvals.'
     ],
-    generateSql: ({ loginId, vendorId, dateMode, startDate, endDate, parameterized }) => {
-      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 10001);
-      const vendorClause = vendorId 
-        ? (parameterized ? 'AND ta."vendorId" = :vendorId\n  ' : `AND ta."vendorId" = ${vendorId}\n  `) 
-        : '';
+    generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
       const dateClause = dateMode === 'single'
         ? (parameterized ? 'ft."createdAt"::date = :startDate::date' : `ft."createdAt"::date = '${startDate}'::date`)
         : (parameterized 
@@ -229,7 +216,7 @@ FROM "TradingAccount" ta
 JOIN "FundTransaction" ft ON ft."accountId" = ta.id
 LEFT JOIN "Staff" st ON st.id = ft."processedByStaffId"
 WHERE ta.login = ${loginVal}
-  ${vendorClause}AND ${dateClause}
+  AND ${dateClause}
 ORDER BY ft."createdAt" DESC;`;
     }
   },
@@ -239,18 +226,15 @@ ORDER BY ft."createdAt" DESC;`;
     title: 'Failed & Rejected Fund Transactions',
     description: 'Diagnoses failed deposits and withdrawals, displaying failure error codes, gateway messages, and reversal linkages.',
     tables: ['TradingAccount', 'FundTransaction'],
-    indexes: ['TradingAccount_vendorId_login_key', 'FundTransaction_accountId_createdAt_idx'],
+    indexes: ['TradingAccount_login_key', 'FundTransaction_accountId_createdAt_idx'],
     sensitivity: 'High (Financial)',
     diagnosticNotes: [
       'failureCode and failureMessage contain error payloads returned from the payment gateway.',
       'reversalOfId links compensatory transactions created when a transaction rolled back.',
       'Useful for resolving customer deposit credit delays or banking gateway timeouts.'
     ],
-    generateSql: ({ loginId, vendorId, dateMode, startDate, endDate, parameterized }) => {
-      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 10001);
-      const vendorClause = vendorId 
-        ? (parameterized ? 'AND ta."vendorId" = :vendorId\n  ' : `AND ta."vendorId" = ${vendorId}\n  `) 
-        : '';
+    generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
       const dateClause = dateMode === 'single'
         ? (parameterized ? 'ft."createdAt"::date = :startDate::date' : `ft."createdAt"::date = '${startDate}'::date`)
         : (parameterized 
@@ -278,7 +262,7 @@ SELECT
 FROM "TradingAccount" ta
 JOIN "FundTransaction" ft ON ft."accountId" = ta.id
 WHERE ta.login = ${loginVal}
-  ${vendorClause}AND ft.status IN ('FAILED', 'REJECTED', 'CANCELLED')
+  AND ft.status IN ('FAILED', 'REJECTED', 'CANCELLED')
   AND ${dateClause}
 ORDER BY ft."createdAt" DESC;`;
     }
@@ -291,18 +275,15 @@ ORDER BY ft."createdAt" DESC;`;
     title: 'Stop-Out & Margin Call Liquidations',
     description: 'Investigates account liquidations, margin ratio dips below stop-out threshold, and automatic system position liquidations.',
     tables: ['TradingAccount', 'MarginLog', 'Position'],
-    indexes: ['TradingAccount_vendorId_login_key', 'MarginLog_accountId_createdAt_idx'],
+    indexes: ['TradingAccount_login_key', 'MarginLog_accountId_createdAt_idx'],
     sensitivity: 'Medium',
     diagnosticNotes: [
       'Margin level under 100% triggers margin call; under 50% triggers stop-out liquidation.',
       'Inspect equity vs usedMargin at the precise moment of liquidation.',
       'Cross-check if sudden market volatility or widening spreads reduced free margin.'
     ],
-    generateSql: ({ loginId, vendorId, dateMode, startDate, endDate, parameterized }) => {
-      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 10001);
-      const vendorClause = vendorId 
-        ? (parameterized ? 'AND ta."vendorId" = :vendorId\n  ' : `AND ta."vendorId" = ${vendorId}\n  `) 
-        : '';
+    generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
       const dateClause = dateMode === 'single'
         ? (parameterized ? 'ml."createdAt"::date = :startDate::date' : `ml."createdAt"::date = '${startDate}'::date`)
         : (parameterized 
@@ -328,7 +309,7 @@ SELECT
 FROM "TradingAccount" ta
 JOIN "MarginLog" ml ON ml."accountId" = ta.id
 WHERE ta.login = ${loginVal}
-  ${vendorClause}AND (ml."eventType" IN ('MARGIN_CALL', 'STOP_OUT', 'LIQUIDATION') OR ml."marginLevel" <= 50.0)
+  AND (ml."eventType" IN ('MARGIN_CALL', 'STOP_OUT', 'LIQUIDATION') OR ml."marginLevel" <= 50.0)
   AND ${dateClause}
 ORDER BY ml."createdAt" DESC;`;
     }
@@ -339,18 +320,15 @@ ORDER BY ml."createdAt" DESC;`;
     title: 'Daily PnL & Equity Timeline',
     description: 'Inspects end-of-day equity, balance, floating PnL, deposit/withdrawal net flows, and commission/swap totals.',
     tables: ['TradingAccount', 'DailyPnL'],
-    indexes: ['TradingAccount_vendorId_login_key', 'DailyPnL_accountId_date_idx'],
+    indexes: ['TradingAccount_login_key', 'DailyPnL_accountId_date_idx'],
     sensitivity: 'Medium',
     diagnosticNotes: [
       'Provides a day-by-day accounting reconciliation of user balance movements.',
       'Verify if balance change equals (realizedPnL + depositWithdrawal - swapTotal - commissionTotal).',
       'Useful for reconciling periodic account statements and client disputes.'
     ],
-    generateSql: ({ loginId, vendorId, dateMode, startDate, endDate, parameterized }) => {
-      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 10001);
-      const vendorClause = vendorId 
-        ? (parameterized ? 'AND ta."vendorId" = :vendorId\n  ' : `AND ta."vendorId" = ${vendorId}\n  `) 
-        : '';
+    generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
       const dateClause = dateMode === 'single'
         ? (parameterized ? 'dp."date"::date = :startDate::date' : `dp."date"::date = '${startDate}'::date`)
         : (parameterized 
@@ -375,7 +353,7 @@ SELECT
 FROM "TradingAccount" ta
 JOIN "DailyPnL" dp ON dp."accountId" = ta.id
 WHERE ta.login = ${loginVal}
-  ${vendorClause}AND ${dateClause}
+  AND ${dateClause}
 ORDER BY dp."date" DESC;`;
     }
   },
@@ -387,18 +365,15 @@ ORDER BY dp."date" DESC;`;
     title: 'Device Logins, IP & User-Agent History',
     description: 'Tracks user sessions, client device types, IP addresses, and token expirations to detect unauthorized access or account sharing.',
     tables: ['TradingAccount', 'Session'],
-    indexes: ['TradingAccount_vendorId_login_key', 'Session_accountId_idx'],
+    indexes: ['TradingAccount_login_key', 'Session_accountId_idx'],
     sensitivity: 'High (Security/PII)',
     diagnosticNotes: [
       'Check for multiple distinct ipAddress entries within short time frames (impossible travel).',
       'deviceType and userAgent help confirm if access was via mobile app, desktop web, or automated bot.',
       'Examine isActive and expiresAt to verify whether stale sessions are still valid.'
     ],
-    generateSql: ({ loginId, vendorId, dateMode, startDate, endDate, parameterized }) => {
-      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 10001);
-      const vendorClause = vendorId 
-        ? (parameterized ? 'AND ta."vendorId" = :vendorId\n  ' : `AND ta."vendorId" = ${vendorId}\n  `) 
-        : '';
+    generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
       const dateClause = dateMode === 'single'
         ? (parameterized ? 's."createdAt"::date = :startDate::date' : `s."createdAt"::date = '${startDate}'::date`)
         : (parameterized 
@@ -422,7 +397,7 @@ SELECT
 FROM "TradingAccount" ta
 JOIN "Session" s ON s."accountId" = ta.id
 WHERE ta.login = ${loginVal}
-  ${vendorClause}AND ${dateClause}
+  AND ${dateClause}
 ORDER BY s."createdAt" DESC;`;
     }
   },
@@ -434,18 +409,15 @@ ORDER BY s."createdAt" DESC;`;
     title: 'Account Settings & Privilege Audit Trail',
     description: 'Audit logs for leverage adjustments, password resets, read-only status changes, and administrative modifications.',
     tables: ['TradingAccount', 'AuditLog'],
-    indexes: ['TradingAccount_vendorId_login_key', 'AuditLog_entity_entityId_idx', 'AuditLog_createdAt_idx'],
+    indexes: ['TradingAccount_login_key', 'AuditLog_entity_entityId_idx', 'AuditLog_createdAt_idx'],
     sensitivity: 'High (Security/PII)',
     diagnosticNotes: [
       'The before and after JSON columns capture full attribute deltas (e.g. leverage 100 -> 500).',
       'actorType and actorId reveal who executed the change (e.g. STAFF vs SYSTEM).',
       'Critical for investigating complaints of unauthorized parameter changes before trading losses.'
     ],
-    generateSql: ({ loginId, vendorId, dateMode, startDate, endDate, parameterized }) => {
-      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 10001);
-      const vendorClause = vendorId 
-        ? (parameterized ? 'AND al."vendorId" = :vendorId\n  ' : `AND al."vendorId" = ${vendorId}\n  `) 
-        : '';
+    generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
       const dateClause = dateMode === 'single'
         ? (parameterized ? 'al."createdAt"::date = :startDate::date' : `al."createdAt"::date = '${startDate}'::date`)
         : (parameterized 
@@ -472,7 +444,7 @@ SELECT
 FROM "TradingAccount" ta
 JOIN "AuditLog" al ON (al.entity = 'TradingAccount' AND al."entityId" = ta.id::text)
 WHERE ta.login = ${loginVal}
-  ${vendorClause}AND ${dateClause}
+  AND ${dateClause}
 ORDER BY al."createdAt" DESC;`;
     }
   },
@@ -482,18 +454,15 @@ ORDER BY al."createdAt" DESC;`;
     title: 'Dealer Overrides & Interventions',
     description: 'Reveals manual dealer actions, quote adjustments, execution routings, or manual order cancellations performed by staff.',
     tables: ['TradingAccount', 'DealerIntervention', 'DealerAction', 'Staff'],
-    indexes: ['TradingAccount_vendorId_login_key', 'DealerIntervention_accountId_idx'],
+    indexes: ['TradingAccount_login_key', 'DealerIntervention_accountId_idx'],
     sensitivity: 'Medium',
     diagnosticNotes: [
       'Identifies whether an order was routed through a manual dealing desk before fill.',
       'Check dealer_action_taken (e.g. REQUOTE, ACCEPT, REJECT) and dealer comments.',
       'Essential for audit and trade dispute resolution.'
     ],
-    generateSql: ({ loginId, vendorId, dateMode, startDate, endDate, parameterized }) => {
-      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 10001);
-      const vendorClause = vendorId 
-        ? (parameterized ? 'AND ta."vendorId" = :vendorId\n  ' : `AND ta."vendorId" = ${vendorId}\n  `) 
-        : '';
+    generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
       const dateClause = dateMode === 'single'
         ? (parameterized ? 'di."createdAt"::date = :startDate::date' : `di."createdAt"::date = '${startDate}'::date`)
         : (parameterized 
@@ -520,7 +489,7 @@ JOIN "DealerIntervention" di ON di."accountId" = ta.id
 LEFT JOIN "Staff" st ON st.id = di."assignedToStaffId"
 LEFT JOIN "DealerAction" da ON da."interventionId" = di.id
 WHERE ta.login = ${loginVal}
-  ${vendorClause}AND ${dateClause}
+  AND ${dateClause}
 ORDER BY di."createdAt" DESC;`;
     }
   }
@@ -529,25 +498,20 @@ ORDER BY di."createdAt" DESC;`;
 export function generateCustomQuery({
   prompt,
   loginId,
-  vendorId,
   dateMode,
   startDate,
   endDate,
   parameterized
 }: {
   prompt: string;
-  loginId: string;
-  vendorId?: string;
+  loginId?: string;
   dateMode: 'single' | 'range';
   startDate: string;
   endDate?: string;
   parameterized: boolean;
 }): { sql: string; metadata: { tables: string[]; indexes: string[]; sensitivity: string; diagnosticNotes?: string[] } } {
   const p = prompt.toLowerCase();
-  const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 10001);
-  const vendorClause = vendorId 
-    ? (parameterized ? 'AND ta."vendorId" = :vendorId\n  ' : `AND ta."vendorId" = ${vendorId}\n  `) 
-    : '';
+  const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
 
   const buildDateClause = (tblAlias: string) => {
     return dateMode === 'single'
@@ -569,7 +533,7 @@ export function generateCustomQuery({
     return {
       metadata: {
         tables: ['TradingAccount', 'AuditLog', 'Deal', 'Staff'],
-        indexes: ['TradingAccount_vendorId_login_key', 'AuditLog_accountId_idx', 'Deal_accountId_idx'],
+        indexes: ['TradingAccount_login_key', 'AuditLog_accountId_idx', 'Deal_accountId_idx'],
         sensitivity: 'High (Financial)',
         diagnosticNotes: [
           'seconds_to_liquidation < 300 indicates leverage was altered immediately prior to margin stop-out.',
@@ -605,7 +569,7 @@ LEFT JOIN "Staff" st ON st.id = al."staffId"
 JOIN "Deal" d ON d."accountId" = ta.id 
   AND (d.comment ILIKE '%so%' OR d.comment ILIKE '%stop%' OR d.comment ILIKE '%liquid%' OR d.comment ILIKE '%closeout%')
 WHERE ta.login = ${loginVal}
-  ${vendorClause}AND ${buildDateClause('al')}
+  AND ${buildDateClause('al')}
   AND d."createdAt" >= al."createdAt"
 ORDER BY al."createdAt" DESC, d."createdAt" ASC;`
     };
@@ -625,7 +589,7 @@ ORDER BY al."createdAt" DESC, d."createdAt" ASC;`
     return {
       metadata: {
         tables: ['TradingAccount', 'UserSession', 'User'],
-        indexes: ['TradingAccount_vendorId_login_key', 'UserSession_ipAddress_idx', 'UserSession_deviceFingerprint_idx'],
+        indexes: ['TradingAccount_login_key', 'UserSession_ipAddress_idx', 'UserSession_deviceFingerprint_idx'],
         sensitivity: 'High (Security/PII)',
         diagnosticNotes: [
           'Reveals accounts operating under identical IP addresses or hardware fingerprints.',
@@ -644,7 +608,7 @@ WITH target_sessions AS (
     FROM "TradingAccount" ta
     JOIN "UserSession" us ON us."userId" = ta."userId"
     WHERE ta.login = ${loginVal}
-      ${vendorClause}AND ${buildDateClause('us')}
+      AND ${buildDateClause('us')}
 )
 SELECT 
     ${loginVal} AS target_login,
@@ -677,8 +641,8 @@ LIMIT 100;`
   ) {
     return {
       metadata: {
-        tables: ['TradingAccount', 'Order', 'Deal', 'VendorInstrument'],
-        indexes: ['TradingAccount_vendorId_login_key', 'Order_accountId_idx', 'Deal_orderId_idx'],
+        tables: ['TradingAccount', 'Order', 'Deal', 'Instrument'],
+        indexes: ['TradingAccount_login_key', 'Order_accountId_idx', 'Deal_orderId_idx'],
         sensitivity: 'Medium',
         diagnosticNotes: [
           'Calculates execution latency in seconds between order submission and LP fill confirmation.',
@@ -710,7 +674,7 @@ FROM "TradingAccount" ta
 JOIN "Order" o ON o."accountId" = ta.id
 JOIN "Deal" d ON d."orderId" = o.id
 WHERE ta.login = ${loginVal}
-  ${vendorClause}AND ${buildDateClause('o')}
+  AND ${buildDateClause('o')}
   AND (
       ROUND(EXTRACT(EPOCH FROM (d."createdAt" - o."createdAt"))::numeric, 3) > 1.000 
       OR ABS(d."executionPrice" - d."requestedPrice") > 0.00050
@@ -734,7 +698,7 @@ LIMIT 100;`
     return {
       metadata: {
         tables: ['TradingAccount', 'FundTransaction', 'Staff'],
-        indexes: ['TradingAccount_vendorId_login_key', 'FundTransaction_accountId_idx', 'FundTransaction_utr_idx'],
+        indexes: ['TradingAccount_login_key', 'FundTransaction_accountId_idx', 'FundTransaction_utr_idx'],
         sensitivity: 'High (Financial)',
         diagnosticNotes: [
           'Lists all incoming and outgoing funds transactions with UTR banking codes and gateway references.',
@@ -768,7 +732,7 @@ FROM "TradingAccount" ta
 JOIN "FundTransaction" ft ON ft."accountId" = ta.id
 LEFT JOIN "Staff" st ON st.id = ft."staffId"
 WHERE ta.login = ${loginVal}
-  ${vendorClause}AND ${buildDateClause('ft')}
+  AND ${buildDateClause('ft')}
 ORDER BY ft."createdAt" DESC;`
     };
   }
@@ -787,7 +751,7 @@ ORDER BY ft."createdAt" DESC;`
     return {
       metadata: {
         tables: ['TradingAccount', 'AuditLog', 'Staff'],
-        indexes: ['TradingAccount_vendorId_login_key', 'AuditLog_accountId_idx'],
+        indexes: ['TradingAccount_login_key', 'AuditLog_accountId_idx'],
         sensitivity: 'High (Security/PII)',
         diagnosticNotes: [
           'Examines backoffice manual actions performed on the client account.',
@@ -818,7 +782,7 @@ FROM "TradingAccount" ta
 JOIN "AuditLog" al ON al."accountId" = ta.id
 JOIN "Staff" st ON st.id = al."staffId"
 WHERE ta.login = ${loginVal}
-  ${vendorClause}AND ${buildDateClause('al')}
+  AND ${buildDateClause('al')}
 ORDER BY al."createdAt" DESC;`
     };
   }
@@ -834,7 +798,7 @@ ORDER BY al."createdAt" DESC;`
     return {
       metadata: {
         tables: ['TradingAccount', 'Order', 'ExecutionEvent'],
-        indexes: ['TradingAccount_vendorId_login_key', 'Order_accountId_idx', 'ExecutionEvent_orderId_idx'],
+        indexes: ['TradingAccount_login_key', 'Order_accountId_idx', 'ExecutionEvent_orderId_idx'],
         sensitivity: 'Medium',
         diagnosticNotes: [
           'Uncovers failed execution attempts with rejection codes and bridge status notes.',
@@ -863,7 +827,7 @@ FROM "TradingAccount" ta
 JOIN "Order" o ON o."accountId" = ta.id
 LEFT JOIN "ExecutionEvent" ee ON ee."orderId" = o.id AND ee.status = 'REJECTED'
 WHERE ta.login = ${loginVal}
-  ${vendorClause}AND o.status IN ('REJECTED', 'CANCELLED', 'EXPIRED')
+  AND o.status IN ('REJECTED', 'CANCELLED', 'EXPIRED')
   AND ${buildDateClause('o')}
 ORDER BY o."createdAt" DESC;`
     };
@@ -874,7 +838,7 @@ ORDER BY o."createdAt" DESC;`
     return {
       metadata: {
         tables: ['TradingAccount', 'User', 'KycDocument', 'KycStateHistory'],
-        indexes: ['TradingAccount_vendorId_login_key', 'User_id_idx', 'KycStateHistory_userId_idx'],
+        indexes: ['TradingAccount_login_key', 'User_id_idx', 'KycStateHistory_userId_idx'],
         sensitivity: 'High (Security/PII)',
         diagnosticNotes: [
           'Chronicles user verification status changes and staff approval history.',
@@ -904,7 +868,7 @@ JOIN "User" u ON u.id = ta."userId"
 LEFT JOIN "KycStateHistory" ksh ON ksh."userId" = u.id
 LEFT JOIN "Staff" st ON st.id = ksh."staffId"
 WHERE ta.login = ${loginVal}
-  ${vendorClause}ORDER BY ksh."createdAt" DESC;`
+ORDER BY ksh."createdAt" DESC;`
     };
   }
 
@@ -913,7 +877,7 @@ WHERE ta.login = ${loginVal}
     return {
       metadata: {
         tables: ['TradingAccount', 'SupportTicket', 'SupportTicketMessage', 'Staff'],
-        indexes: ['TradingAccount_vendorId_login_key', 'SupportTicket_accountId_idx'],
+        indexes: ['TradingAccount_login_key', 'SupportTicket_accountId_idx'],
         sensitivity: 'Medium',
         diagnosticNotes: [
           'Displays support inquiries raised by or on behalf of this trading account.',
@@ -943,7 +907,7 @@ JOIN "SupportTicket" stk ON stk."accountId" = ta.id
 LEFT JOIN "Staff" creator ON creator.id = stk."creatorStaffId"
 LEFT JOIN "Staff" assignee ON assignee.id = stk."assigneeStaffId"
 WHERE ta.login = ${loginVal}
-  ${vendorClause}ORDER BY stk."createdAt" DESC;`
+ORDER BY stk."createdAt" DESC;`
     };
   }
 
@@ -951,8 +915,8 @@ WHERE ta.login = ${loginVal}
   if (p.includes('position') || p.includes('floating') || p.includes('unrealized') || p.includes('lots')) {
     return {
       metadata: {
-        tables: ['TradingAccount', 'Position', 'VendorInstrument'],
-        indexes: ['TradingAccount_vendorId_login_key', 'Position_accountId_idx'],
+        tables: ['TradingAccount', 'Position', 'Instrument'],
+        indexes: ['TradingAccount_login_key', 'Position_accountId_idx'],
         sensitivity: 'Medium',
         diagnosticNotes: [
           'Snapshot of active open market exposure across all currency pairs.',
@@ -981,7 +945,7 @@ SELECT
 FROM "TradingAccount" ta
 JOIN "Position" p ON p."accountId" = ta.id
 WHERE ta.login = ${loginVal}
-  ${vendorClause}AND p.volume > 0
+  AND p.volume > 0
 ORDER BY ABS(p."floatingPnL") DESC;`
     };
   }
@@ -990,7 +954,7 @@ ORDER BY ABS(p."floatingPnL") DESC;`
   return {
     metadata: {
       tables: ['TradingAccount', 'Order', 'Deal', 'FundTransaction', 'AuditLog'],
-      indexes: ['TradingAccount_vendorId_login_key', 'Order_accountId_idx', 'Deal_accountId_idx'],
+      indexes: ['TradingAccount_login_key', 'Order_accountId_idx', 'Deal_accountId_idx'],
       sensitivity: 'Medium',
       diagnosticNotes: [
         'Deterministic zero-cost ad-hoc diagnostic query synthesized from your prompt.',
@@ -1019,6 +983,6 @@ SELECT
     (SELECT COUNT(*) FROM "Position" p WHERE p."accountId" = ta.id AND p.volume > 0) AS active_open_positions
 FROM "TradingAccount" ta
 WHERE ta.login = ${loginVal}
-  ${vendorClause}LIMIT 1;`
+LIMIT 1;`
   };
 }
