@@ -22,6 +22,7 @@ import {
   Zap,
   Loader2,
   ChevronDown,
+  RotateCcw,
   ExternalLink
 } from 'lucide-react';
 import { QUERY_TEMPLATES, QueryTemplate, generateCustomQuery } from '@/lib/templates';
@@ -38,7 +39,7 @@ export default function DashboardPage() {
   const [endDate, setEndDate] = useState<string>('2026-10-30');
   const [activeCaseId, setActiveCaseId] = useState<string>('remove-demo-live-accounts');
   const [searchReason, setSearchReason] = useState<string>('');
-  const [customPrompt, setCustomPrompt] = useState<string>('Check if leverage was modified right before stop-out');
+  const [customPrompt, setCustomPrompt] = useState<string>('remove the word "demo" from all the live accounts');
   const [parameterized, setParameterized] = useState<boolean>(false);
 
   // AI & Custom Query States
@@ -56,6 +57,7 @@ export default function DashboardPage() {
 
   // UI States
   const [copiedSql, setCopiedSql] = useState<boolean>(false);
+  const [isResetting, setIsResetting] = useState<boolean>(false);
   const [isDropdownOpen, setIsDropdownOpen] = useState<boolean>(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -71,7 +73,12 @@ export default function DashboardPage() {
     const params = new URLSearchParams(window.location.search);
     
     if (params.get('login')) setLoginId(params.get('login') || '');
-    if (params.get('case')) setActiveCaseId(params.get('case') || 'remove-demo-live-accounts');
+    const caseParam = params.get('case');
+    if (caseParam && caseParam !== 'slippage-analysis') {
+      setActiveCaseId(caseParam);
+    } else {
+      setActiveCaseId('remove-demo-live-accounts');
+    }
     if (params.get('dateMode') === 'single' || params.get('dateMode') === 'range') {
       setDateMode(params.get('dateMode') as 'single' | 'range');
     }
@@ -79,7 +86,8 @@ export default function DashboardPage() {
     setEndDate(params.get('to') || todayStr);
     if (params.get('mode') === 'param') setParameterized(true);
     if (params.get('mode') === 'injected') setParameterized(false);
-    if (params.get('prompt')) setCustomPrompt(params.get('prompt') || '');
+    const promptParam = params.get('prompt');
+    if (promptParam) setCustomPrompt(promptParam);
   }, []);
 
   // Update URL whenever relevant parameters change
@@ -222,6 +230,29 @@ export default function DashboardPage() {
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
+  };
+
+  // -------------------------------------------------------------
+  // Reset Everything to Default
+  // -------------------------------------------------------------
+  const handleResetAll = () => {
+    const now = new Date();
+    const todayStr = now.toISOString().split('T')[0];
+    const last7DaysStr = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
+
+    setLoginId('100234');
+    setDateMode('range');
+    setStartDate(last7DaysStr);
+    setEndDate(todayStr);
+    setActiveCaseId('slippage-analysis');
+    setSearchReason('');
+    setCustomPrompt('Check if leverage was modified right before stop-out');
+    setCustomQueryResult(null);
+    setParameterized(false);
+    setIsDropdownOpen(false);
+
+    setIsResetting(true);
+    setTimeout(() => setIsResetting(false), 1200);
   };
 
   // -------------------------------------------------------------
@@ -497,6 +528,23 @@ export default function DashboardPage() {
               )}
             </div>
 
+            {/* 4. Reset to Default Button */}
+            <button
+              type="button"
+              onClick={handleResetAll}
+              className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700/80 hover:border-slate-500 hover:bg-slate-800 text-slate-400 hover:text-white text-xs font-semibold transition-all shadow-sm active:scale-95 shrink-0 group"
+              title="Reset all filters, dates, and query selections back to default"
+            >
+              {isResetting ? (
+                <Check className="w-3.5 h-3.5 text-emerald-400" />
+              ) : (
+                <RotateCcw className="w-3.5 h-3.5 text-slate-400 group-hover:-rotate-90 transition-transform duration-200" />
+              )}
+              <span className={isResetting ? 'text-emerald-400 font-semibold' : ''}>
+                {isResetting ? 'Reset Done' : 'Reset'}
+              </span>
+            </button>
+
           </div>
         </div>
       </header>
@@ -519,16 +567,7 @@ export default function DashboardPage() {
                   Custom Prompt Here:
                 </label>
               </div>
-              <div className="flex items-center gap-1.5 text-[10px] text-cyan-400/90 bg-cyan-950/80 px-2.5 py-0.5 rounded-full border border-cyan-800/60 font-mono">
-                <Zap className="w-3 h-3 text-cyan-400" />
-                <span>
-                  {isGeneratingAi
-                    ? 'Synthesizing with Groq Llama 3.3...'
-                    : customQueryResult?.isAiGenerated
-                    ? (customQueryResult.aiEngine || 'Groq Llama 3.3 AI Synthesized')
-                    : 'Groq LPU Engine Ready'}
-                </span>
-              </div>
+              
             </div>
 
             {/* Input & Action Button Row */}
@@ -552,7 +591,7 @@ export default function DashboardPage() {
                     }
                   }}
                   style={{ padding: '10px 4px' }}
-                  placeholder="e.g. Find accounts with leverage changes 5m before stop-out, or find accounts sharing IP"
+                  placeholder="e.g. remove the word &quot;demo&quot; from all the live accounts, or find accounts sharing IP"
                   className="flex-1 bg-transparent text-sm sm:text-base text-white placeholder-slate-500 focus:outline-none font-sans min-w-0"
                 />
                 {customPrompt && (
@@ -592,32 +631,7 @@ export default function DashboardPage() {
               </button>
             </div>
 
-            {/* Quick Suggestion Chips */}
-            <div className="flex flex-wrap items-center gap-2 pt-3">
-              <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider mr-1">
-                Try Scenario:
-              </span>
-              {[
-                'Remove demo from all live accounts',
-                'Leverage modified right before stop-out',
-                'Cross-account IP & device sharing',
-                'Execution latency > 1s and slippage spikes',
-                'Deposit, withdrawal & UTR tracking'
-              ].map((chip) => (
-                <button
-                  key={chip}
-                  type="button"
-                  onClick={() => {
-                    setCustomPrompt(chip);
-                    setCustomQueryResult(null);
-                    handleGenerateCustomQuery(chip);
-                  }}
-                  className="text-xs px-3 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-cyan-300 border border-slate-800 hover:border-cyan-700/60 transition-all flex items-center gap-1.5"
-                >
-                  <span>{chip}</span>
-                </button>
-              ))}
-            </div>
+           
           </div>
         )}
 

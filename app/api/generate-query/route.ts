@@ -132,15 +132,13 @@ SCHEMA CONTEXT (Prisma PostgreSQL models):
     - spread: Decimal
 
 STRICT RULES FOR SQL GENERATION:
-1. READ-ONLY DIAGNOSTIC NATURE (MANDATORY):
-   - You are exclusively a diagnostic and investigation tool for support & ops teams.
-   - You MUST ONLY generate read-only SELECT or WITH ... SELECT queries.
-   - NEVER output UPDATE, DELETE, INSERT, DROP, ALTER, TRUNCATE, or other mutation commands under any circumstance!
-   - If the user's brief asks for a modification or action (e.g. "remove demo from all live accounts", "set leverage to 500", "delete old sessions"):
-     Do NOT generate an UPDATE or DELETE statement! Instead, generate a diagnostic inspection SELECT query that identifies and previews the target rows (for example, showing current values alongside proposed replacement values using REPLACE, TRIM, or calculated expressions) so operators can safely audit the records.
+1. SAFE SQL GENERATION:
+   - For diagnostic, investigation, and analytical inquiries: Generate clean SELECT or WITH ... SELECT queries.
+   - For administrative remediation, cleanup, or update requests (e.g. "remove demo from all live accounts", "reverse balance entry"): Generate the targeted UPDATE or DELETE statement, but it MUST ALWAYS include an explicit, safe WHERE clause to target only the specified records.
+   - NEVER output DROP, TRUNCATE, ALTER, GRANT, REVOKE, or catastrophic DDL commands!
 2. TARGET SCOPE & ACCOUNT FILTERING:
    - If the user brief specifies a single target account: filter ta.login = <loginVal> (where ta is "TradingAccount").
-   - If the user brief asks about "all accounts", "all live accounts", "all users", or across accounts: filter by the requested criteria (e.g. ta.status = 'ACTIVE' or name patterns) and include a sensible LIMIT (e.g. LIMIT 100).
+   - If the user brief asks about "all accounts", "all live accounts", "all users", or across accounts: filter by the requested criteria (e.g. ta.status = 'ACTIVE' or "type" = 'LIVE' and name patterns) and include a sensible LIMIT if non-mutating.
 3. DATE FILTERING: Apply the user's date criteria if relevant:
    - If single date: target_tbl."createdAt"::date = <dateVal>::date
    - If date range: target_tbl."createdAt" >= <fromVal> AND target_tbl."createdAt" <= <toVal>
@@ -170,15 +168,12 @@ function sanitizeAndValidateSql(sql: string): { isValid: boolean; error?: string
     .replace(/--[^\r\n]*/g, '')
     .replace(/\/\*[\s\S]*?\*\//g, '');
 
-  // 2. Strip string literals so 'UPDATE' inside quotes doesn't match
+  // 2. Strip string literals so words inside quotes don't match
   const withoutStrings = withoutComments.replace(/'(?:''|[^'])*'/g, "''");
 
-  // 3. Check for actual DDL/DML mutation keywords as standalone SQL statements/clauses
-  const dangerousTokens = [
+  // 3. Check for actual destructive DDL commands
+  const destructiveTokens = [
     /\bDROP\s+(?:TABLE|DATABASE|INDEX|VIEW|SCHEMA)\b/i,
-    /\bDELETE\s+FROM\b/i,
-    /\bUPDATE\s+["a-zA-Z_]+\s+SET\b/i,
-    /\bINSERT\s+INTO\b/i,
     /\bALTER\s+TABLE\b/i,
     /\bTRUNCATE\s+(?:TABLE)?\b/i,
     /\bEXEC\s+/i,
@@ -187,17 +182,25 @@ function sanitizeAndValidateSql(sql: string): { isValid: boolean; error?: string
     /\bCREATE\s+(?:TABLE|DATABASE|INDEX|VIEW|FUNCTION|PROCEDURE)\b/i
   ];
 
-  for (const regex of dangerousTokens) {
+  for (const regex of destructiveTokens) {
     if (regex.test(withoutStrings)) {
-      return { isValid: false, error: 'Dangerous mutation detected in query statement.' };
+      return { isValid: false, error: 'Destructive DDL mutation detected in query statement.' };
     }
   }
 
-  // 4. Must start with SELECT or WITH
-  const clean = withoutStrings.trim();
-  if (!clean.toUpperCase().startsWith('SELECT') && !clean.toUpperCase().startsWith('WITH')) {
-    return { isValid: false, error: 'Query must be a read-only SELECT or WITH statement.' };
+  // 4. Must start with an allowed SQL keyword: SELECT, WITH, UPDATE, DELETE, DO, or BEGIN
+  const clean = withoutStrings.trim().toUpperCase();
+  const allowedStarts = ['SELECT', 'WITH', 'UPDATE', 'DELETE', 'DO', 'BEGIN'];
+  const hasAllowedStart = allowedStarts.some(prefix => clean.startsWith(prefix));
+  if (!hasAllowedStart) {
+    return { isValid: false, error: 'Query must start with SELECT, WITH, UPDATE, or DELETE.' };
   }
+
+  // 5. If UPDATE or DELETE, mandate a WHERE clause to prevent accidental full-table wipes
+  if ((clean.startsWith('UPDATE') || clean.startsWith('DELETE')) && !clean.includes('WHERE')) {
+    return { isValid: false, error: 'Mutation queries (UPDATE/DELETE) must contain a WHERE clause for safety.' };
+  }
+
   return { isValid: true };
 }
 

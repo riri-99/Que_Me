@@ -1363,54 +1363,39 @@ ORDER BY ABS(p."floatingPnL") DESC;`
     };
   }
 
-  // 10. ACCOUNT NAME / DEMO / LIVE ACCOUNT CLEANUP OR INSPECTION
+  // 10. REMOVE DEMO FROM LIVE ACCOUNTS
   if (
-    p.includes('demo') ||
-    p.includes('name') ||
-    p.includes('rename') ||
-    p.includes('clean') ||
-    p.includes('live') ||
-    p.includes('remove')
+    p.includes('demo') &&
+    (p.includes('remove') || p.includes('delete') || p.includes('strip') || p.includes('clean') || p.includes('live'))
   ) {
-    const isLiveFilter = p.includes('live') || p.includes('active');
-    const statusClause = isLiveFilter ? `ta.status = 'ACTIVE'` : `1 = 1`;
-    const targetFilter = p.includes('all') 
-      ? (p.includes('demo') ? `${statusClause} AND ta.name ILIKE '%demo%'` : statusClause) 
-      : `${statusClause} AND (ta.login = ${loginVal} OR ta.name ILIKE '%demo%')`;
-
     return {
       metadata: {
-        tables: ['TradingAccount', 'User'],
-        indexes: ['TradingAccount_login_key', 'User_id_idx'],
-        sensitivity: 'Low',
+        tables: ['TradingAccount'],
+        indexes: ['TradingAccount_type_idx', 'TradingAccount_name_idx'],
+        sensitivity: 'High (Security/PII)',
         diagnosticNotes: [
-          'Diagnostic inspection query to identify accounts matching naming criteria before making administrative updates.',
-          'proposed_cleaned_name demonstrates safe preview of string replacement using REPLACE().',
-          'Review account balances and open positions before applying bulk status or name changes.'
+          'Executes regex replacement with word boundary check \\ydemo\\y case-insensitively.',
+          'Cleans redundant whitespace with TRIM and REGEXP_REPLACE(\\s+, " ").',
+          'Only updates records with "type" = \'LIVE\' containing "demo".'
         ]
       },
       sql: `-- =====================================================================
--- Custom Query: Account Name & Live Status Inspection
+-- Custom Query: Remove the word "demo" from all the live accounts
 -- Prompt: "${prompt}"
--- Target: TradingAccount inspection (Diagnostic Preview)
+-- Target: TradingAccount (type = 'LIVE' and name ILIKE '%demo%')
 -- =====================================================================
 
-SELECT 
-    ta.id AS account_id,
-    ta.login AS account_login,
-    ta.name AS current_name,
-    TRIM(REPLACE(REPLACE(ta.name, 'demo', ''), 'DEMO', '')) AS proposed_cleaned_name,
-    ta.status AS account_status,
-    ta.currency,
-    ta.balance,
-    ta.equity,
-    u.email AS user_email,
-    ta."createdAt" AS created_at
-FROM "TradingAccount" ta
-JOIN "User" u ON u.id = ta."userId"
-WHERE ${targetFilter}
-ORDER BY ta."createdAt" DESC
-LIMIT 100;`
+UPDATE "TradingAccount"
+    SET
+        "name" = TRIM(
+            REGEXP_REPLACE(
+                REGEXP_REPLACE("name", '\\ydemo\\y', '', 'gi'),
+                '\\s+', ' ', 'g'
+            )
+        ),
+        "updatedAt" = NOW()
+    WHERE "type" = 'LIVE'
+      AND "name" ILIKE '%demo%';`
     };
   }
 
