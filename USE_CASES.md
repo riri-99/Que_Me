@@ -228,4 +228,3 @@ This document lists all **27 built-in operational diagnostics, financial reconci
 2. **Search by Keyword**: Type any word (e.g. *drift*, *stranded*, *reconcile*, *syndicate*, *dormant*) into the dropdown search box.
 3. **Editable Query Editor**: Once loaded, click directly into the SQL query area to tweak parameters, adjust clauses, or use **Find & Replace** (<kbd>Ctrl+F</kbd>).
 4. **Save as Custom Script**: Click **Save as Script** to persist your modified version in `localStorage` under **My Saved Scripts**.
-5. **AI Prompt Generator**: Type natural language questions in the **Custom Prompt** bar (e.g. *"find accounts where equity does not match balance"*), and the engine will synthesize the corresponding query automatically.

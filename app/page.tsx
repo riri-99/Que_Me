@@ -16,11 +16,9 @@ import {
   AlertTriangle, 
   ShieldCheck, 
   Scale, 
-  Sparkles,
   Info,
   X,
   Zap,
-  Loader2,
   ChevronDown,
   RotateCcw,
   ExternalLink,
@@ -40,7 +38,6 @@ import {
   QueryTemplate, 
   UserCustomScript, 
   QueryStatementType,
-  generateCustomQuery,
   getQueryStatementType,
   getTemplateStatementType
 } from '@/lib/templates';
@@ -73,21 +70,7 @@ export default function DashboardPage() {
   const [endDate, setEndDate] = useState<string>('2026-10-30');
   const [activeCaseId, setActiveCaseId] = useState<string>('remove-demo-live-accounts');
   const [searchReason, setSearchReason] = useState<string>('');
-  const [customPrompt, setCustomPrompt] = useState<string>('remove the word "demo" from all the live accounts');
   const [parameterized, setParameterized] = useState<boolean>(false);
-
-  // AI & Custom Query States
-  const [customQueryResult, setCustomQueryResult] = useState<{
-    sql: string;
-    tables: string[];
-    indexes: string[];
-    sensitivity: string;
-    diagnosticNotes: string[];
-    isAiGenerated?: boolean;
-    aiEngine?: string;
-    notice?: string;
-  } | null>(null);
-  const [isGeneratingAi, setIsGeneratingAi] = useState<boolean>(false);
 
   // UI States
   const [copiedSql, setCopiedSql] = useState<boolean>(false);
@@ -162,8 +145,6 @@ export default function DashboardPage() {
     setEndDate(params.get('to') || todayStr);
     if (params.get('mode') === 'param') setParameterized(true);
     if (params.get('mode') === 'injected') setParameterized(false);
-    const promptParam = params.get('prompt');
-    if (promptParam) setCustomPrompt(promptParam);
   }, []);
 
   // Update URL whenever relevant parameters change
@@ -176,11 +157,10 @@ export default function DashboardPage() {
     if (startDate) params.set('from', startDate);
     if (dateMode === 'range' && endDate) params.set('to', endDate);
     params.set('mode', parameterized ? 'param' : 'injected');
-    if (activeCaseId === 'custom' && customPrompt) params.set('prompt', customPrompt);
 
     const newUrl = `${window.location.pathname}?${params.toString()}`;
     window.history.replaceState({}, '', newUrl);
-  }, [loginId, activeCaseId, dateMode, startDate, endDate, parameterized, customPrompt]);
+  }, [loginId, activeCaseId, dateMode, startDate, endDate, parameterized]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -194,14 +174,14 @@ export default function DashboardPage() {
   }, []);
 
   // -------------------------------------------------------------
-  // Active Template / Custom Query Resolution
+  // Active Template / Custom Script Resolution
   // -------------------------------------------------------------
   const activeUserScript = useMemo(() => {
     return savedCustomScripts.find((s) => s.id === activeCaseId) || null;
   }, [savedCustomScripts, activeCaseId]);
 
   const activeTemplate = useMemo(() => {
-    if (activeCaseId === 'custom' || activeUserScript) return null;
+    if (activeUserScript) return null;
     return QUERY_TEMPLATES.find((t) => t.id === activeCaseId) || QUERY_TEMPLATES[0];
   }, [activeCaseId, activeUserScript]);
 
@@ -224,51 +204,6 @@ export default function DashboardPage() {
           diagnosticNotes: activeUserScript.diagnosticNotes && activeUserScript.diagnosticNotes.length > 0
             ? activeUserScript.diagnosticNotes
             : ['User-defined custom diagnostic and operational script.']
-        }
-      };
-    }
-
-    if (activeCaseId === 'custom') {
-      if (customQueryResult) {
-        return {
-          generatedSql: customQueryResult.sql,
-          currentMetadata: {
-            title: customQueryResult.isAiGenerated ? 'AI-Synthesized Diagnostic Query' : 'Custom Diagnostic Query',
-            description: `Generated for scenario: "${customPrompt}"`,
-            category: 'Custom' as const,
-            statementType: getQueryStatementType(customQueryResult.sql),
-            tables: customQueryResult.tables,
-            indexes: customQueryResult.indexes,
-            sensitivity: customQueryResult.sensitivity,
-            diagnosticNotes: customQueryResult.diagnosticNotes
-          }
-        };
-      }
-
-      const customRes = generateCustomQuery({
-        prompt: customPrompt,
-        loginId,
-        dateMode,
-        startDate,
-        endDate,
-        parameterized
-      });
-      return {
-        generatedSql: customRes.sql,
-        currentMetadata: {
-          title: 'Custom Diagnostic Query',
-          description: `Generated for scenario: "${customPrompt}"`,
-          category: 'Custom' as const,
-          statementType: getQueryStatementType(customRes.sql),
-          tables: customRes.metadata.tables,
-          indexes: customRes.metadata.indexes,
-          sensitivity: customRes.metadata.sensitivity,
-          diagnosticNotes: customRes.metadata.diagnosticNotes && customRes.metadata.diagnosticNotes.length > 0
-            ? customRes.metadata.diagnosticNotes
-            : [
-                'Ad-hoc generated query tailored to your freeform investigation brief.',
-                'Always inspect EXPLAIN ANALYZE on production databases prior to running large joins.'
-              ]
         }
       };
     }
@@ -298,7 +233,7 @@ export default function DashboardPage() {
         diagnosticNotes: activeTemplate.diagnosticNotes
       }
     };
-  }, [activeTemplate, activeUserScript, activeCaseId, customPrompt, loginId, dateMode, startDate, endDate, parameterized, customQueryResult]);
+  }, [activeTemplate, activeUserScript, loginId, dateMode, startDate, endDate, parameterized]);
 
   // Sync generatedSql into editorSql when template or parameters change
   useEffect(() => {
@@ -403,7 +338,7 @@ export default function DashboardPage() {
     } else {
       setScriptFormTitle('Custom Diagnostic Script');
       setScriptFormCategory('Custom');
-      setScriptFormDescription(customPrompt ? `Scenario: ${customPrompt}` : 'Custom SQL diagnostic script.');
+      setScriptFormDescription('Custom SQL diagnostic script.');
       setScriptFormTables('TradingAccount');
     }
     setIsScriptModalOpen(true);
@@ -613,8 +548,6 @@ LIMIT 50;`;
     setEndDate(todayStr);
     setActiveCaseId('remove-demo-live-accounts');
     setSearchReason('');
-    setCustomPrompt('remove the word "demo" from all the live accounts');
-    setCustomQueryResult(null);
     setParameterized(false);
     setIsDropdownOpen(false);
     setIsCustomEdited(false);
@@ -623,67 +556,6 @@ LIMIT 50;`;
 
     setIsResetting(true);
     setTimeout(() => setIsResetting(false), 1200);
-  };
-
-  // -------------------------------------------------------------
-  // AI / Custom Query Generation Dispatcher
-  // -------------------------------------------------------------
-  const handleGenerateCustomQuery = async (overridePrompt?: string) => {
-    const targetPrompt = overridePrompt !== undefined ? overridePrompt : customPrompt;
-    if (!targetPrompt.trim()) return;
-
-    setIsGeneratingAi(true);
-    try {
-      const res = await fetch('/api/generate-query', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt: targetPrompt,
-          loginId,
-          dateMode,
-          startDate,
-          endDate,
-          parameterized
-        })
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData?.details || errData?.error || `API responded with status: ${res.status}`);
-      }
-      const data = await res.json();
-      setCustomQueryResult({
-        sql: data.sql,
-        tables: data.tables || ['TradingAccount'],
-        indexes: data.indexes || ['TradingAccount_login_key'],
-        sensitivity: data.sensitivity || 'Medium',
-        diagnosticNotes: data.diagnosticNotes || [],
-        isAiGenerated: data.isAiGenerated ?? true,
-        aiEngine: data.aiEngine,
-        notice: data.notice
-      });
-    } catch (err) {
-      console.error('AI generation fallback triggered:', err);
-      const fallback = generateCustomQuery({
-        prompt: targetPrompt,
-        loginId,
-        dateMode,
-        startDate,
-        endDate,
-        parameterized
-      });
-      setCustomQueryResult({
-        sql: fallback.sql,
-        tables: fallback.metadata.tables,
-        indexes: fallback.metadata.indexes,
-        sensitivity: fallback.metadata.sensitivity,
-        diagnosticNotes: fallback.metadata.diagnosticNotes || [],
-        isAiGenerated: false,
-        notice: 'Offline schema engine used.'
-      });
-    } finally {
-      setIsGeneratingAi(false);
-    }
   };
 
   // Category Icon Resolver
@@ -700,7 +572,7 @@ LIMIT 50;`;
       case 'Compliance':
         return <Scale className="w-4 h-4 text-purple-400" />;
       default:
-        return <Sparkles className="w-4 h-4 text-cyan-400" />;
+        return <Terminal className="w-4 h-4 text-cyan-400" />;
     }
   };
 
@@ -818,13 +690,7 @@ LIMIT 50;`;
               >
                 <div className="flex items-center gap-2.5 truncate">
                   <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider shrink-0">Use Case:</span>
-                  {activeCaseId === 'custom' ? (
-                    <div className="flex items-center gap-2 truncate">
-                      <Sparkles className="w-4 h-4 text-cyan-400 shrink-0" />
-                      <span className="font-medium text-cyan-300 truncate">Custom</span>
-                      {renderStatementBadge(currentMetadata?.statementType)}
-                    </div>
-                  ) : activeUserScript ? (
+                  {activeUserScript ? (
                     <div className="flex items-center gap-2 truncate">
                       {getCategoryIcon(activeUserScript.category)}
                       <span className="truncate font-medium text-emerald-300">{activeUserScript.title}</span>
@@ -864,34 +730,17 @@ LIMIT 50;`;
                   </div>
 
                   <div className="max-h-80 overflow-y-auto divide-y divide-slate-800/60">
-                    {/* Action Header: Custom Prompt & Write New Script */}
-                    <div className="p-2 grid grid-cols-2 gap-2 bg-slate-950/60">
-                      <div
-                        onClick={() => {
-                          setActiveCaseId('custom');
-                          setIsDropdownOpen(false);
-                        }}
-                        className={`px-3 py-2 rounded-lg hover:bg-slate-800/90 cursor-pointer transition-colors flex items-center gap-2 ${
-                          activeCaseId === 'custom' ? 'bg-indigo-950/60 border border-indigo-700/60' : 'border border-slate-800'
-                        }`}
-                      >
-                        <Sparkles className="w-4 h-4 text-cyan-400 shrink-0" />
-                        <span className="text-xs font-semibold text-cyan-300">
-                          Custom Prompt
-                        </span>
-                      </div>
-
+                    {/* Action Header: Write New Script */}
+                    <div className="p-2 bg-slate-950/60">
                       <div
                         onClick={() => {
                           setIsDropdownOpen(false);
                           handleOpenCreateNewScript();
                         }}
-                        className="px-3 py-2 rounded-lg hover:bg-slate-800/90 cursor-pointer transition-colors flex items-center gap-2 border border-emerald-900/40 bg-emerald-950/20 hover:bg-emerald-900/30"
+                        className="w-full px-3 py-2 rounded-lg hover:bg-emerald-900/40 cursor-pointer transition-colors flex items-center justify-center gap-2 border border-emerald-900/40 bg-emerald-950/30 text-emerald-300 font-semibold text-xs"
                       >
                         <Plus className="w-4 h-4 text-emerald-400 shrink-0" />
-                        <span className="text-xs font-semibold text-emerald-300">
-                          + Write New Script
-                        </span>
+                        <span>Write New Script</span>
                       </div>
                     </div>
 
@@ -998,7 +847,7 @@ LIMIT 50;`;
 
                     {groupedTemplates.length === 0 && (
                       <div className="p-4 text-center text-xs text-slate-500">
-                        No preset templates match "{searchReason}". Try selecting Custom above!
+                        No preset templates match "{searchReason}".
                       </div>
                     )}
                   </div>
@@ -1042,94 +891,12 @@ LIMIT 50;`;
           RESULTS VIEWPORT: TWO MATCHING EXPANSIVE PANELS (SKETCH SPEC)
       ------------------------------------------------------------- */}
       <main className="flex-1 w-full max-w-[1850px] mx-auto px-4 sm:px-6 py-4 flex flex-col">
-        {/* Custom Case Prompt Bar (Shifts panels down when active) */}
-        {activeCaseId === 'custom' && (
-          <div 
-            style={{ padding: '26px 30px', marginBottom: '36px' }}
-            className="w-full bg-slate-950 rounded-2xl border border-cyan-800/60 shadow-xl flex flex-col"
-          >
-            {/* Headline Row with status indicator */}
-            <div style={{ marginBottom: '18px' }} className="flex items-center justify-between gap-2.5">
-              <div className="flex items-center gap-2.5">
-                <Sparkles className="w-4 h-4 text-cyan-400 shrink-0" />
-                <label className="text-sm font-semibold text-cyan-300 tracking-wide">
-                  Custom Prompt Here:
-                </label>
-              </div>
-              
-            </div>
-
-            {/* Input & Action Button Row */}
-            <div className="flex items-center gap-3.5 sm:gap-4">
-              {/* Integrated Input Box with Cross Icon inside at the very end */}
-              <div 
-                style={{ padding: '4px 16px', minHeight: '50px' }}
-                className="flex-1 flex items-center bg-slate-900 border border-slate-700/80 rounded-xl focus-within:ring-2 focus-within:ring-cyan-500 focus-within:border-cyan-500/80 shadow-inner transition-all"
-              >
-                <input
-                  type="text"
-                  value={customPrompt}
-                  onChange={(e) => {
-                    setCustomPrompt(e.target.value);
-                    setCustomQueryResult(null);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      handleGenerateCustomQuery();
-                    }
-                  }}
-                  style={{ padding: '10px 4px' }}
-                  placeholder="e.g. remove the word &quot;demo&quot; from all the live accounts, or find accounts sharing IP"
-                  className="flex-1 bg-transparent text-sm sm:text-base text-white placeholder-slate-500 focus:outline-none font-sans min-w-0"
-                />
-                {customPrompt && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCustomPrompt('');
-                      setCustomQueryResult(null);
-                    }}
-                    style={{ padding: '6px', marginLeft: '8px' }}
-                    className="text-slate-400 hover:text-white transition-colors shrink-0 flex items-center justify-center rounded-lg hover:bg-slate-800"
-                    title="Clear prompt"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                )}
-              </div>
-
-              <button
-                type="button"
-                onClick={() => handleGenerateCustomQuery()}
-                disabled={isGeneratingAi || !customPrompt.trim()}
-                style={{ padding: '14px 24px', minHeight: '50px' }}
-                className="rounded-xl bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white font-semibold text-sm flex items-center gap-2 shadow-md shadow-cyan-950/50 transition-all disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
-              >
-                {isGeneratingAi ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    <span>Synthesizing...</span>
-                  </>
-                ) : (
-                  <>
-                    <Sparkles className="w-4 h-4 text-cyan-200" />
-                    <span>Generate Query</span>
-                  </>
-                )}
-              </button>
-            </div>
-
-           
-          </div>
-        )}
-
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 flex-1 items-stretch">
           
           {/* =========================================================
               LEFT PANEL: USE CASE DESCRIPTION & PLAIN-ENGLISH AUDIT GUIDE
           ========================================================= */}
-          <div className={`lg:col-span-5 flex flex-col ${activeCaseId === 'custom' ? 'pt-2 sm:pt-3' : ''}`}>
+          <div className="lg:col-span-5 flex flex-col">
             <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg flex-1 flex flex-col">
               
               {/* Header: "Use Case Overview" */}
@@ -1234,7 +1001,7 @@ LIMIT 50;`;
           {/* =========================================================
               RIGHT PANEL: > SQL QUERY (EDITABLE CODE EDITOR + ACTIONS)
           ========================================================= */}
-          <div className={`lg:col-span-7 flex flex-col ${activeCaseId === 'custom' ? 'pt-2 sm:pt-3' : ''}`}>
+          <div className="lg:col-span-7 flex flex-col">
             <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg flex-1 flex flex-col">
               
               {/* Header: "SQL query" with Actions */}
