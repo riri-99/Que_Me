@@ -1,6 +1,42 @@
+export type QueryStatementType = 'SELECT' | 'UPDATE' | 'DELETE' | 'SCRIPT';
+
+export function getQueryStatementType(
+  sql?: string,
+  explicitType?: QueryStatementType
+): QueryStatementType {
+  if (explicitType) return explicitType;
+  if (!sql) return 'SELECT';
+  const clean = sql
+    .replace(/--.*$/gm, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .trim()
+    .toUpperCase();
+  if (clean.startsWith('UPDATE')) return 'UPDATE';
+  if (clean.startsWith('DELETE')) return 'DELETE';
+  if (clean.startsWith('DO') || clean.startsWith('BEGIN')) return 'SCRIPT';
+  if (clean.startsWith('SELECT') || clean.startsWith('WITH')) return 'SELECT';
+  return 'SELECT';
+}
+
+export function getTemplateStatementType(tmpl: QueryTemplate): QueryStatementType {
+  if (tmpl.statementType) return tmpl.statementType;
+  try {
+    const sampleSql = tmpl.generateSql({
+      loginId: '100234',
+      dateMode: 'single',
+      startDate: '2026-05-01',
+      parameterized: false
+    });
+    return getQueryStatementType(sampleSql);
+  } catch {
+    return 'SELECT';
+  }
+}
+
 export interface QueryTemplate {
   id: string;
-  category: 'Trading' | 'Funds' | 'Risk' | 'Security' | 'Compliance';
+  category: 'Trading' | 'Funds' | 'Risk' | 'Security' | 'Compliance' | 'Custom';
+  statementType?: QueryStatementType;
   title: string;
   description: string;
   tables: string[];
@@ -14,6 +50,22 @@ export interface QueryTemplate {
     endDate?: string;
     parameterized: boolean;
   }) => string;
+  isUserScript?: boolean;
+}
+
+export interface UserCustomScript {
+  id: string;
+  category: 'Trading' | 'Funds' | 'Risk' | 'Security' | 'Compliance' | 'Custom';
+  statementType?: QueryStatementType;
+  title: string;
+  description: string;
+  tables: string[];
+  indexes?: string[];
+  sensitivity?: 'Low' | 'Medium' | 'High (Financial)' | 'High (Security/PII)';
+  diagnosticNotes?: string[];
+  sql: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export const QUERY_TEMPLATES: QueryTemplate[] = [
@@ -24,14 +76,14 @@ export const QUERY_TEMPLATES: QueryTemplate[] = [
     id: 'remove-demo-live-accounts',
     category: 'Compliance',
     title: 'Remove the word "demo" from all live accounts',
-    description: 'Updates TradingAccount records by regex-stripping the word "demo" and redundant whitespace from all live account names.',
+    description: 'Cleans up live account names across your database. When users switch from a practice demo account to a real money account, the word "demo" often stays stuck in their account name. This query safely finds all real live accounts, removes the word "demo" wherever it appears, fixes double spaces, and updates the timestamp.',
     tables: ['TradingAccount'],
     indexes: ['TradingAccount_type_idx', 'TradingAccount_name_idx'],
     sensitivity: 'High (Security/PII)',
     diagnosticNotes: [
-      'Executes regex replacement with word boundary check \\ydemo\\y case-insensitively.',
-      'Cleans redundant whitespace with TRIM and REGEXP_REPLACE(\\s+, " ").',
-      'Only updates records with "type" = "LIVE" containing "demo".'
+      'Only updates accounts marked as "LIVE" that contain the word "demo".',
+      'Safely removes the word without cutting into other letters (case-insensitive).',
+      'Cleans redundant whitespace with TRIM and REGEXP_REPLACE(\\s+, " ").'
     ],
     generateSql: () => {
       return `-- =====================================================================
@@ -56,13 +108,14 @@ UPDATE "TradingAccount"
     id: 'orders-closed-sl-tp',
     category: 'Trading',
     title: 'Orders Closed by Exit Triggers (SL/TP)',
-    description: 'Identifies all orders closed by Stop Loss or Take Profit execution price sources and exit reasons.',
+    description: 'Shows every trade that was closed automatically because the price reached the client\'s safety limits: Stop Loss (maximum loss limit) or Take Profit (target gain limit). Useful when a client asks why their trade closed.',
     tables: ['TradingAccount', 'Order'],
     indexes: ['TradingAccount_login_key', 'Order_accountId_idx', 'Order_filledAt_idx'],
     sensitivity: 'Medium',
     diagnosticNotes: [
-      'Filters by priceSource in (SL_TRIGGER, TP_TRIGGER) or order reason in (SL, TP).',
-      'Audits closingOrderId, orderType, filledQuantity, and executed price (averagePrice).'
+      'Confirms whether the trade closed due to an automatic price trigger or a manual button click.',
+      'Shows the requested price limit versus the exact price the trade exited at.',
+      'Audits the closing order ID, quantity, and exact exit timestamp.'
     ],
     generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
       const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 130599);
@@ -106,13 +159,14 @@ ORDER BY o."filledAt" DESC;`;
     id: 'market-execution-orders',
     category: 'Trading',
     title: 'Market Execution Orders & Position Audit',
-    description: 'Audits market execution orders, linked position execution prices, close reasons, and realized PnL.',
+    description: 'Gives a complete history of instant trades where the customer clicked Buy or Sell to enter the market immediately. Shows order entry price, final close price, close reason, and whether the client made or lost money.',
     tables: ['TradingAccount', 'Order', 'Position', 'Instrument'],
     indexes: ['TradingAccount_login_key', 'Order_accountId_idx', 'Position_openedByOrderId_idx', 'Position_closedAt_idx'],
     sensitivity: 'Medium',
     diagnosticNotes: [
-      'Filters for executionType = MARKET or standard BUY/SELL order types.',
-      'Joins Position on openedByOrderId to track openPrice, closePrice, closeReason, and realizedPnl.'
+      'Connects the initial order request directly to the resulting trade outcome and final dollar profit/loss.',
+      'Audits close reasons such as USER (manual close), SL, TP, or STOP_OUT.',
+      'Useful for investigating trade disputes and verifying execution results.'
     ],
     generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
       const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 130599);
@@ -165,13 +219,14 @@ ORDER BY p."closedAt" DESC;`;
     id: 'limit-orders-audit',
     category: 'Trading',
     title: 'Limit Orders & Position Execution Audit',
-    description: 'Examines pending and executed limit orders, requested limit price vs executed price, and position outcomes.',
+    description: 'Checks all "Limit Orders"—trades set to execute in the future only if the price reaches a better, specified rate. Shows which orders are still waiting, which ones got filled, and whether the client got their requested price or better.',
     tables: ['TradingAccount', 'Order', 'Position', 'Instrument'],
     indexes: ['TradingAccount_login_key', 'Order_accountId_idx', 'Position_openedByOrderId_idx'],
     sensitivity: 'Medium',
     diagnosticNotes: [
-      'Filters for executionType = LIMIT or orderType in (BUY_LIMIT, SELL_LIMIT).',
-      'Audits limitPrice vs averagePrice to detect positive or negative execution delta.'
+      'Monitors pending trades waiting for the market to reach a specific price.',
+      'Compares the client\'s requested entry price against the final execution fill.',
+      'Tracks final profit or loss once the filled trade was eventually closed.'
     ],
     generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
       const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 130599);
@@ -225,13 +280,14 @@ ORDER BY p."closedAt" DESC;`;
     id: 'stop-limit-orders-audit',
     category: 'Trading',
     title: 'Stop Limit Orders & Trigger Audit',
-    description: 'Audits stop-limit orders including stopTriggerPrice, stopLimitPrice, executedOrderPrice, and position PnL.',
+    description: 'Audits two-step pending trades (Stop-Limit orders). These orders wake up when the market hits a trigger price, then attempt to fill within an acceptable price limit. Shows the trigger price, the limit boundary, the final filled price, and the trade outcome.',
     tables: ['TradingAccount', 'Order', 'Position', 'Instrument'],
     indexes: ['TradingAccount_login_key', 'Order_accountId_idx', 'Position_openedByOrderId_idx'],
     sensitivity: 'Medium',
     diagnosticNotes: [
-      'Filters for executionType = STOP_LIMIT or orderType in (BUY_STOP_LIMIT, SELL_STOP_LIMIT).',
-      'Inspects stopTriggerPrice vs limitPrice and execution latency.'
+      'Verifies that the trading system correctly triggered the order when the market crossed the threshold.',
+      'Checks if the order was filled within the customer\'s specified maximum price limit.',
+      'Useful during rapid price jumps or economic news announcements.'
     ],
     generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
       const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 130599);
@@ -286,13 +342,14 @@ ORDER BY p."closedAt" DESC;`;
     id: 'find-transaction-deal-footprint',
     category: 'Funds',
     title: 'Find Balance Transaction & Deal Footprint',
-    description: 'Locates FundTransaction details, linked balance/credit deals, positions, and ledger entries for an account.',
+    description: 'Tracks down the entire history of a specific deposit, withdrawal, or balance correction. It reveals every financial record created across the database—including balance adjustments, credit deals, and ledger rows—so you know exactly how the money moved.',
     tables: ['FundTransaction', 'TradingAccount', 'Deal'],
     indexes: ['FundTransaction_accountId_idx', 'Deal_accountId_idx', 'TradingAccount_login_key'],
     sensitivity: 'High (Financial)',
     diagnosticNotes: [
-      'Joins FundTransaction to Deal where dealType in (BALANCE, CREDIT, CHARGE, CORRECTION, BONUS).',
-      'Correlates deal profit with fund transaction amount within a 10-second epoch window.'
+      'Traces a money transfer from the user\'s account through the entire internal ledger.',
+      'Shows all linked balance updates and credit events associated with the transaction.',
+      'Essential to check before attempting to cancel or reverse any deposit or credit.'
     ],
     generateSql: ({ loginId, parameterized }) => {
       const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 123456);
@@ -328,14 +385,14 @@ LIMIT 10;`;
     id: 'atomic-balance-cleanup',
     category: 'Funds',
     title: 'Atomic Balance & Footprint Cleanup Script',
-    description: 'Atomic PL/pgSQL transaction script to delete linked Deal, Position, Ledger entries, and revert TradingAccount balance and StaffWallet.',
+    description: 'A safe, all-in-one cleanup script designed to cancel an incorrect deposit or mistaken credit. It automatically adjusts the customer\'s balance back to what it should be, removes the erroneous ledger entries, and updates internal staff records in a single safe database step.',
     tables: ['FundTransaction', 'Deal', 'Position', 'LedgerEntry', 'LedgerTransaction', 'TradingAccount', 'StaffWallet'],
     indexes: ['FundTransaction_id_key', 'Deal_id_key', 'Position_id_key'],
     sensitivity: 'High (Financial)',
     diagnosticNotes: [
-      'Executes within an atomic DO $$ BEGIN ... END $$; transaction block.',
-      'Cascades deletion: Deal -> Position -> LedgerEntry -> LedgerTransaction -> FundTransaction.',
-      'Reverts TradingAccount figures and refunds StaffWallet if applicable.'
+      'Runs inside an all-or-nothing database transaction: if any part fails, everything cancels safely.',
+      'Deducts the mistaken credit amount from the account balance.',
+      'Deletes or reverses the linked deal and ledger records so financial reports stay accurate.'
     ],
     generateSql: ({ parameterized }) => {
       const ftIdVal = parameterized ? ':fundTransactionId' : 'YOUR_FUND_TRANSACTION_ID';
@@ -435,14 +492,14 @@ END $$;`;
     id: 'slippage-analysis',
     category: 'Trading',
     title: 'Order Slippage & Execution Discrepancy',
-    description: 'Compares requested prices against actual execution prices on executed deals to detect slippage, execution latency, and routing performance.',
+    description: 'Measures the difference between the price the customer saw when they clicked "Trade" and the actual price their order got filled at. Calculates this price difference (slippage) in points and shows how many milliseconds it took to execute.',
     tables: ['TradingAccount', 'Order', 'Deal', 'Instrument'],
     indexes: ['TradingAccount_login_key', 'Order_accountId_idx', 'Deal_orderId_idx'],
     sensitivity: 'Medium',
     diagnosticNotes: [
-      'Positive slippage_points indicates execution above requested price (favorable or unfavorable depending on BUY/SELL).',
-      'High latency between o."createdAt" and d."createdAt" may point to LP routing delays.',
-      'Check if deal volume matches full order volume or represents a partial fill.'
+      'Highlights orders that suffered negative price slippage (worse fill than requested).',
+      'Measures execution delay: longer delays during news events often lead to price differences.',
+      'Helps answer customer tickets complaining that they received a different price than expected.'
     ],
     generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
       const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
@@ -485,14 +542,14 @@ ORDER BY d."createdAt" DESC;`;
     id: 'rejected-orders',
     category: 'Trading',
     title: 'Rejected, Cancelled & Expired Orders',
-    description: 'Finds all non-filled orders with system rejection codes, dealer cancellations, or timeout errors.',
+    description: 'Lists all trades that could not be completed, along with the plain-language reason why the system rejected or cancelled them—such as not having enough money in the account, the market being closed, or the order expiring.',
     tables: ['TradingAccount', 'Order', 'ExecutionEvent'],
     indexes: ['TradingAccount_login_key', 'Order_accountId_idx', 'ExecutionEvent_orderId_idx'],
     sensitivity: 'Medium',
     diagnosticNotes: [
-      'ExecutionEvent logs contain internal error messages from the liquidity bridge/gateway.',
-      'Common rejection causes include INSUFFICIENT_MARGIN, OFF_QUOTES, or MARKET_CLOSED.',
-      'Cross-check if order was manually rejected by dealer or automated risk filter.'
+      'Shows the exact error code returned by the trading engine or liquidity gateway.',
+      'Helps support teams immediately tell a customer why their trade was declined.',
+      'Filters out filled trades to focus strictly on failed or cancelled attempts.'
     ],
     generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
       const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
@@ -534,14 +591,14 @@ ORDER BY o."createdAt" DESC;`;
     id: 'open-positions-pnl',
     category: 'Trading',
     title: 'Open Positions & Real-Time Floating PnL',
-    description: 'Retrieves active open positions, floating PnL, overnight swap fees, commission charges, and margin commitments.',
+    description: 'A live snapshot of all trades currently active and open in the market right now. Shows how much money each trade is currently making or losing (floating profit/loss), overnight holding fees (swaps), commission costs, and required margin.',
     tables: ['TradingAccount', 'Position', 'Instrument'],
     indexes: ['TradingAccount_login_key', 'Position_accountId_idx'],
     sensitivity: 'Medium',
     diagnosticNotes: [
-      'floatingPnl represents mark-to-market unrealized profit or loss at the latest tick.',
-      'Check swap and commission fees if user disputes balance reductions while holding open trades.',
-      'Verify if position sl (Stop Loss) or tp (Take Profit) were properly placed.'
+      'Real-time view of current open risk for the account.',
+      'Shows overnight holding fees (swaps) accumulated on trades kept open across days.',
+      'Sorted by largest floating gain or loss so you can spot high-risk trades instantly.'
     ],
     generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
       const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
@@ -586,14 +643,14 @@ ORDER BY p."createdAt" DESC;`;
     id: 'fund-transfers',
     category: 'Funds',
     title: 'Deposit, Withdrawal & UTR Tracking',
-    description: 'Details all incoming deposits, outgoing withdrawals, bank account references, UTR numbers, and approval staff.',
+    description: 'A detailed bank and payment log showing every deposit and withdrawal. Displays the payment method (bank transfer, credit card, crypto), reference numbers (like bank UTR codes), approval status, and which staff member approved the payout.',
     tables: ['TradingAccount', 'FundTransaction', 'Staff', 'BankAccount'],
     indexes: ['TradingAccount_login_key', 'FundTransaction_accountId_createdAt_idx', 'FundTransaction_utrNumber_key'],
     sensitivity: 'High (Financial)',
     diagnosticNotes: [
-      'Use utrNumber to cross-verify bank settlement records or payment gateway webhooks.',
-      'currentBalance shows the exact account balance recorded right after this transaction settled.',
-      'Check processedByStaffId to audit manual backoffice approvals.'
+      'Complete history of money coming into and going out of the account.',
+      'Includes bank transaction reference / UTR numbers to match with bank statements.',
+      'Identifies which team member approved or processed each withdrawal.'
     ],
     generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
       const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
@@ -637,14 +694,14 @@ ORDER BY ft."createdAt" DESC;`;
     id: 'failed-funds',
     category: 'Funds',
     title: 'Failed & Rejected Fund Transactions',
-    description: 'Diagnoses failed deposits and withdrawals, displaying failure error codes, gateway messages, and reversal linkages.',
+    description: 'Finds all deposits or withdrawals that failed, got cancelled, or were rejected. Shows the error code, payment gateway message, and whether money was returned to the customer\'s balance.',
     tables: ['TradingAccount', 'FundTransaction'],
     indexes: ['TradingAccount_login_key', 'FundTransaction_accountId_createdAt_idx'],
     sensitivity: 'High (Financial)',
     diagnosticNotes: [
-      'failureCode and failureMessage contain error payloads returned from the payment gateway.',
-      'reversalOfId links compensatory transactions created when a transaction rolled back.',
-      'Useful for resolving customer deposit credit delays or banking gateway timeouts.'
+      'Quickly identifies why a deposit failed (e.g., card expired, bank declined, incorrect reference).',
+      'Checks if a failed withdrawal was safely refunded back to the client\'s trading balance.',
+      'Helps support agents resolve payment issues while talking to the customer.'
     ],
     generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
       const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
@@ -685,15 +742,15 @@ ORDER BY ft."createdAt" DESC;`;
   {
     id: 'stopout-liquidation',
     category: 'Risk',
-    title: 'Stop-Out & Margin Call Liquidations',
-    description: 'Investigates account liquidations, margin ratio dips below stop-out threshold, and automatic system position liquidations.',
+    title: 'Forced Trade Closures When Money Runs Out (Stop-Out & Liquidations)',
+    description: 'Investigates when an account runs out of money to keep its trades open. When account equity drops too low, the trading system automatically closes trades to protect against debt. This query shows every automatic forced closure, the account balance at that moment, and how low the funds dropped.',
     tables: ['TradingAccount', 'MarginLog', 'Position'],
     indexes: ['TradingAccount_login_key', 'MarginLog_accountId_createdAt_idx'],
     sensitivity: 'Medium',
     diagnosticNotes: [
-      'Margin level under 100% triggers margin call; under 50% triggers stop-out liquidation.',
-      'Inspect equity vs usedMargin at the precise moment of liquidation.',
-      'Cross-check if sudden market volatility or widening spreads reduced free margin.'
+      'Shows when account funds fell below the safety limit (often 50% or 100%), triggering forced trade closures.',
+      'Compares actual account value (equity) against the minimum money required to keep trades running (used margin).',
+      'Helps explain to a customer why their trades were automatically closed by the system.'
     ],
     generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
       const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
@@ -730,15 +787,15 @@ ORDER BY ml."createdAt" DESC;`;
   {
     id: 'daily-pnl-history',
     category: 'Risk',
-    title: 'Daily PnL & Equity Timeline',
-    description: 'Inspects end-of-day equity, balance, floating PnL, deposit/withdrawal net flows, and commission/swap totals.',
+    title: 'Daily Balance & Profit Calendar (Day-by-Day Financial History)',
+    description: 'A day-by-day financial calendar for an account. Shows closing balance, account value, deposits, withdrawals, daily trading profit or loss, overnight holding fees (swaps), and trading commissions for each day.',
     tables: ['TradingAccount', 'DailyPnL'],
     indexes: ['TradingAccount_login_key', 'DailyPnL_accountId_date_idx'],
     sensitivity: 'Medium',
     diagnosticNotes: [
-      'Provides a day-by-day accounting reconciliation of user balance movements.',
-      'Verify if balance change equals (realizedPnL + depositWithdrawal - swapTotal - commissionTotal).',
-      'Useful for reconciling periodic account statements and client disputes.'
+      'Daily breakdown showing how the account balance and equity grew or shrank day-by-day.',
+      'Checks if daily balance changes match: starting balance + deposits - withdrawals + trading profit - fees.',
+      'Ideal for generating periodic customer account statements or answering client balance questions.'
     ],
     generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
       const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
@@ -775,15 +832,15 @@ ORDER BY dp."date" DESC;`;
   {
     id: 'active-sessions-ip',
     category: 'Security',
-    title: 'Device Logins, IP & User-Agent History',
-    description: 'Tracks user sessions, client device types, IP addresses, and token expirations to detect unauthorized access or account sharing.',
+    title: 'Login Security History (Devices, IP Locations & Active Logins)',
+    description: 'Tracks every time the user logged into their account, what device they used (mobile app, desktop browser), their internet IP address, and whether the login session is still active. Helps spot unauthorized logins or account sharing.',
     tables: ['TradingAccount', 'Session'],
     indexes: ['TradingAccount_login_key', 'Session_accountId_idx'],
     sensitivity: 'High (Security/PII)',
     diagnosticNotes: [
-      'Check for multiple distinct ipAddress entries within short time frames (impossible travel).',
-      'deviceType and userAgent help confirm if access was via mobile app, desktop web, or automated bot.',
-      'Examine isActive and expiresAt to verify whether stale sessions are still valid.'
+      'Spots logins from different cities or countries within a short time (impossible travel).',
+      'Shows whether the client logged in using an iPhone, Android, web browser, or automated script.',
+      'Verifies if old or suspicious login sessions are still active or properly expired.'
     ],
     generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
       const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
@@ -819,15 +876,15 @@ ORDER BY s."createdAt" DESC;`;
   {
     id: 'account-audit-trail',
     category: 'Compliance',
-    title: 'Account Settings & Privilege Audit Trail',
-    description: 'Audit logs for leverage adjustments, password resets, read-only status changes, and administrative modifications.',
+    title: 'Account Settings History & Staff Changes (Audit Trail)',
+    description: 'A security log showing every change made to the account settings—such as password resets, changes to leverage limits, switching to read-only mode, or profile updates. Reveals who made each change and what the value was before and after.',
     tables: ['TradingAccount', 'AuditLog'],
     indexes: ['TradingAccount_login_key', 'AuditLog_entity_entityId_idx', 'AuditLog_createdAt_idx'],
     sensitivity: 'High (Security/PII)',
     diagnosticNotes: [
-      'The before and after JSON columns capture full attribute deltas (e.g. leverage 100 -> 500).',
-      'actorType and actorId reveal who executed the change (e.g. STAFF vs SYSTEM).',
-      'Critical for investigating complaints of unauthorized parameter changes before trading losses.'
+      'Captures exact before-and-after values (for example, leverage changed from 1:100 to 1:500).',
+      'Shows whether the change was made by a support staff member, the client themselves, or an automatic system rule.',
+      'Crucial for investigating client complaints about unexpected setting changes before trading losses.'
     ],
     generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
       const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
@@ -864,15 +921,15 @@ ORDER BY al."createdAt" DESC;`;
   {
     id: 'dealer-interventions',
     category: 'Compliance',
-    title: 'Dealer Overrides & Interventions',
-    description: 'Reveals manual dealer actions, quote adjustments, execution routings, or manual order cancellations performed by staff.',
+    title: 'Manual Staff Overrides & Dealer Actions',
+    description: 'Shows any manual adjustments made by dealing desk staff or support managers. Lists trades that were manually reviewed, price quotes adjusted, orders manually rejected, or special approvals given by staff instead of the automatic system.',
     tables: ['TradingAccount', 'DealerIntervention', 'DealerAction', 'Staff'],
     indexes: ['TradingAccount_login_key', 'DealerIntervention_accountId_idx'],
     sensitivity: 'Medium',
     diagnosticNotes: [
-      'Identifies whether an order was routed through a manual dealing desk before fill.',
-      'Check dealer_action_taken (e.g. REQUOTE, ACCEPT, REJECT) and dealer comments.',
-      'Essential for audit and trade dispute resolution.'
+      'Reveals if a customer trade was held for manual review by a staff member before being filled.',
+      'Shows the staff member\'s name and the specific action taken (accepted, requoted at a new price, or rejected).',
+      'Essential for handling client disputes where manual human intervention is suspected.'
     ],
     generateSql: ({ loginId, dateMode, startDate, endDate, parameterized }) => {
       const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
@@ -904,6 +961,541 @@ LEFT JOIN "DealerAction" da ON da."interventionId" = di.id
 WHERE ta.login = ${loginVal}
   AND ${dateClause}
 ORDER BY di."createdAt" DESC;`;
+    }
+  },
+
+  // =================================================================
+  // RECONCILIATION, MULTI-ACCOUNT ABUSE & REMEDIATION (NEW SUITE)
+  // =================================================================
+  {
+    id: 'balance-equity-drift',
+    category: 'Risk',
+    title: 'Account Math Check (Balance vs. Equity Drift)',
+    description: 'Checks if the account numbers add up correctly: Account Equity should always equal the Cash Balance plus the live profit or loss on all open trades. If the numbers don\'t match, this query flags the account as an anomaly caused by stuck trades, pricing glitches, or quote disconnects.',
+    tables: ['TradingAccount', 'Position'],
+    indexes: ['TradingAccount_login_key', 'Position_accountId_idx'],
+    sensitivity: 'High (Financial)',
+    diagnosticNotes: [
+      'Flags accounts where recorded equity differs from (Balance + Open Trade Profit/Loss) by more than 5 cents ($0.05).',
+      'Catches system glitches where a trade didn\'t update equity properly or price delays froze calculations.',
+      'Helps support and risk desks prevent incorrect automatic liquidations.'
+    ],
+    generateSql: ({ loginId, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
+      return `-- =====================================================================
+-- Scenario: Live Balance vs. Equity Drift Detection
+-- Target: TradingAccount login = ${loginVal} (or all accounts with discrepancy)
+-- =====================================================================
+
+WITH PositionAggregates AS (
+    SELECT
+        p."accountId",
+        COUNT(p.id)                               AS open_position_count,
+        COALESCE(SUM(p."floatingPnL"), 0.00)      AS total_floating_pnl,
+        COALESCE(SUM(p.swap), 0.00)              AS total_swap,
+        COALESCE(SUM(p.commission), 0.00)        AS total_commission
+    FROM "Position" p
+    WHERE p.volume > 0
+    GROUP BY p."accountId"
+)
+SELECT
+    ta.login                                    AS account_login,
+    ta.name                                     AS account_name,
+    ta.status                                   AS account_status,
+    ta.currency                                 AS currency,
+    ta.balance                                  AS recorded_balance,
+    ta.equity                                   AS recorded_equity,
+    COALESCE(pa.open_position_count, 0)         AS active_positions,
+    COALESCE(pa.total_floating_pnl, 0.00)       AS live_floating_pnl,
+    ROUND(ta.balance + COALESCE(pa.total_floating_pnl, 0.00), 2) AS expected_equity,
+    ROUND(ta.equity - (ta.balance + COALESCE(pa.total_floating_pnl, 0.00)), 2) AS equity_drift,
+    CASE
+        WHEN ABS(ta.equity - (ta.balance + COALESCE(pa.total_floating_pnl, 0.00))) > 0.05 THEN 'DESYNC_ANOMALY'
+        ELSE 'SYNCHRONIZED'
+    END                                         AS sync_status
+FROM "TradingAccount" ta
+LEFT JOIN PositionAggregates pa ON pa."accountId" = ta.id
+WHERE (
+    ta.login = ${loginVal}
+    OR ABS(ta.equity - (ta.balance + COALESCE(pa.total_floating_pnl, 0.00))) > 0.05
+)
+ORDER BY ABS(ta.equity - (ta.balance + COALESCE(pa.total_floating_pnl, 0.00))) DESC;`;
+    }
+  },
+  {
+    id: 'nbp-eligibility-deficits',
+    category: 'Funds',
+    title: 'Negative Balance Protection (NBP) & Accounts in Debt',
+    description: 'Finds client accounts that have fallen below zero ($0.00) due to extreme price jumps (such as over weekends or high-volatility news). Identifies accounts that qualify for Negative Balance Protection—a standard safety guarantee where the broker cancels client debt so they don\'t owe money.',
+    tables: ['TradingAccount', 'FundTransaction', 'Position'],
+    indexes: ['TradingAccount_login_key', 'FundTransaction_accountId_idx'],
+    sensitivity: 'High (Financial)',
+    diagnosticNotes: [
+      'Finds all accounts with a negative cash balance (balance < $0.00).',
+      'Checks if the client still has open trades running before approving debt forgiveness.',
+      'Excludes accounts that already had their negative balance forgiven in the last 14 days.'
+    ],
+    generateSql: ({ loginId, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
+      return `-- =====================================================================
+-- Scenario: Negative Balance Protection (NBP) Eligibility & Unprocessed Deficits
+-- Target: TradingAccount (balance < 0 and no unprocessed/completed NBP credit)
+-- =====================================================================
+
+SELECT
+    ta.id                                       AS account_id,
+    ta.login                                    AS account_login,
+    ta.name                                     AS account_name,
+    ta.status                                   AS account_status,
+    ta.currency                                 AS currency,
+    ta.balance                                  AS deficit_balance,
+    ta.equity                                   AS current_equity,
+    (
+        SELECT COUNT(*)
+        FROM "Position" p
+        WHERE p."accountId" = ta.id AND p.volume > 0
+    )                                           AS open_positions,
+    (
+        SELECT COUNT(*)
+        FROM "FundTransaction" ft
+        WHERE ft."accountId" = ta.id
+          AND ft.type = 'NEGATIVE_BALANCE_PROTECTION'
+          AND ft.status IN ('PENDING', 'PROCESSING', 'COMPLETED')
+    )                                           AS existing_nbp_adjustments,
+    ta."createdAt"                              AS account_created_at
+FROM "TradingAccount" ta
+WHERE ta.balance < 0.00
+  AND (
+      ta.login = ${loginVal}
+      OR ta.status != 'CLOSED'
+  )
+  AND NOT EXISTS (
+      SELECT 1
+      FROM "FundTransaction" ft
+      WHERE ft."accountId" = ta.id
+        AND ft.type = 'NEGATIVE_BALANCE_PROTECTION'
+        AND ft.status IN ('PENDING', 'PROCESSING', 'COMPLETED')
+        AND ft."createdAt" >= NOW() - INTERVAL '14 days'
+  )
+ORDER BY ta.balance ASC;`;
+    }
+  },
+  {
+    id: 'cash-ledger-reconciliation',
+    category: 'Funds',
+    title: 'Total Cash Audit (Money In/Out vs. Recorded Balance)',
+    description: 'An independent audit that recalculates the customer\'s balance from scratch. Adds up all deposits, subtracts all withdrawals, adds realized trade profits, and subtracts all fees and commissions. Compares this calculated sum directly against the stored balance to catch any missing money or database errors.',
+    tables: ['TradingAccount', 'FundTransaction', 'Deal', 'Position'],
+    indexes: ['TradingAccount_login_key', 'FundTransaction_accountId_idx', 'Deal_accountId_idx'],
+    sensitivity: 'High (Financial)',
+    diagnosticNotes: [
+      'Calculates theoretical balance: (Deposits - Withdrawals + Credits) + Trade Profits - Commissions - Holding Fees.',
+      'Compares theoretical balance against the recorded balance to reveal any mathematical difference.',
+      'Catches unrecorded deposits, database synchronization errors, or unauthorized manual balance adjustments.'
+    ],
+    generateSql: ({ loginId, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
+      return `-- =====================================================================
+-- Scenario: Full Cash Ledger vs. Account Balance Reconciliation
+-- Target: TradingAccount login = ${loginVal}
+-- =====================================================================
+
+WITH LedgerFundTxs AS (
+    SELECT
+        ft."accountId",
+        COALESCE(SUM(CASE WHEN ft.type = 'DEPOSIT' AND ft.status = 'COMPLETED' THEN ft.amount ELSE 0 END), 0.00) AS total_deposits,
+        COALESCE(SUM(CASE WHEN ft.type = 'WITHDRAWAL' AND ft.status = 'COMPLETED' THEN ft.amount ELSE 0 END), 0.00) AS total_withdrawals,
+        COALESCE(SUM(CASE WHEN ft.type = 'CREDIT_CORRECTION' AND ft.status = 'COMPLETED' THEN ft.amount ELSE 0 END), 0.00) AS total_credits,
+        COALESCE(SUM(CASE WHEN ft.type = 'NEGATIVE_BALANCE_PROTECTION' AND ft.status = 'COMPLETED' THEN ft.amount ELSE 0 END), 0.00) AS total_nbp
+    FROM "FundTransaction" ft
+    GROUP BY ft."accountId"
+),
+LedgerDeals AS (
+    SELECT
+        d."accountId",
+        COALESCE(SUM(
+            CASE 
+                WHEN d.entry IN ('OUT', 'IN_OUT') THEN (d."executionPrice" - d."requestedPrice") * d.volume
+                ELSE 0.00 
+            END
+        ), 0.00) AS total_realized_profit
+    FROM "Deal" d
+    GROUP BY d."accountId"
+),
+LedgerPositions AS (
+    SELECT
+        p."accountId",
+        COALESCE(SUM(p.swap), 0.00) AS total_swaps,
+        COALESCE(SUM(p.commission), 0.00) AS total_commissions
+    FROM "Position" p
+    GROUP BY p."accountId"
+)
+SELECT
+    ta.login                                    AS account_login,
+    ta.name                                     AS account_name,
+    ta.balance                                  AS recorded_balance,
+    COALESCE(lft.total_deposits, 0.00)          AS total_deposits,
+    COALESCE(lft.total_withdrawals, 0.00)       AS total_withdrawals,
+    COALESCE(lft.total_credits, 0.00)           AS total_credits,
+    COALESCE(lft.total_nbp, 0.00)               AS total_nbp_adjustments,
+    COALESCE(ld.total_realized_profit, 0.00)    AS total_realized_deal_profit,
+    COALESCE(lp.total_swaps, 0.00)              AS total_swaps_charged,
+    COALESCE(lp.total_commissions, 0.00)        AS total_commissions_charged,
+    ROUND(
+        (COALESCE(lft.total_deposits, 0) - COALESCE(lft.total_withdrawals, 0) + COALESCE(lft.total_credits, 0) + COALESCE(lft.total_nbp, 0))
+        + COALESCE(ld.total_realized_profit, 0) 
+        - COALESCE(lp.total_commissions, 0) 
+        - COALESCE(lp.total_swaps, 0),
+        2
+    )                                           AS calculated_theoretical_balance,
+    ROUND(
+        ta.balance - (
+            (COALESCE(lft.total_deposits, 0) - COALESCE(lft.total_withdrawals, 0) + COALESCE(lft.total_credits, 0) + COALESCE(lft.total_nbp, 0))
+            + COALESCE(ld.total_realized_profit, 0) 
+            - COALESCE(lp.total_commissions, 0) 
+            - COALESCE(lp.total_swaps, 0)
+        ),
+        2
+    )                                           AS balance_discrepancy
+FROM "TradingAccount" ta
+LEFT JOIN LedgerFundTxs lft ON lft."accountId" = ta.id
+LEFT JOIN LedgerDeals ld ON ld."accountId" = ta.id
+LEFT JOIN LedgerPositions lp ON lp."accountId" = ta.id
+WHERE ta.login = ${loginVal}
+ORDER BY ABS(ta.balance) DESC;`;
+    }
+  },
+  {
+    id: 'stranded-positions-suspended-accounts',
+    category: 'Risk',
+    title: 'Stranded Live Trades on Frozen / Suspended Accounts',
+    description: 'High-priority risk check: Finds accounts that were suspended, locked, or put into read-only mode by support or compliance, but still have active live trades running in the market. Because the customer is locked out and cannot manage or close these trades, they face uncontrolled risk.',
+    tables: ['TradingAccount', 'Position', 'User'],
+    indexes: ['TradingAccount_type_idx', 'Position_accountId_idx'],
+    sensitivity: 'High (Financial)',
+    diagnosticNotes: [
+      'High operational risk: Customer account is locked or suspended, but live trades remain open in the market.',
+      'The customer cannot close or manage these trades due to account login restrictions.',
+      'Requires immediate review by risk desk to close trades or protect against further losses.'
+    ],
+    generateSql: ({ loginId, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
+      return `-- =====================================================================
+-- Scenario: Suspended / Read-Only Accounts with Stranded Open Positions
+-- Target: TradingAccount status IN ('SUSPENDED', 'READ_ONLY') with active positions
+-- =====================================================================
+
+SELECT
+    ta.login                                    AS account_login,
+    ta.name                                     AS account_name,
+    ta.status                                   AS account_status,
+    u.email                                     AS client_email,
+    p.id                                        AS position_id,
+    p."externalSymbol"                          AS symbol,
+    p.side                                      AS side,
+    p.volume                                    AS lot_size,
+    p."openPrice"                               AS open_price,
+    p."currentPrice"                            AS current_price,
+    p."floatingPnL"                             AS floating_pnl,
+    p."createdAt"                               AS position_opened_at,
+    ROUND(EXTRACT(EPOCH FROM (NOW() - p."createdAt")) / 3600::numeric, 1) AS hours_stranded
+FROM "TradingAccount" ta
+JOIN "User" u ON u.id = ta."userId"
+JOIN "Position" p ON p."accountId" = ta.id
+WHERE ta.status IN ('SUSPENDED', 'READ_ONLY')
+  AND p.volume > 0
+  AND (
+      ta.login = ${loginVal}
+      OR ${loginVal} = 100234
+  )
+ORDER BY ABS(p."floatingPnL") DESC, p."createdAt" ASC;`;
+    }
+  },
+  {
+    id: 'dormant-accounts-positive-balance',
+    category: 'Compliance',
+    title: 'Dormant Accounts with Positive Cash Balance (Inactive 90+ Days)',
+    description: 'Finds active accounts holding real money that have had zero trades and no user logins for over 90, 180, or 365 days. Used for compliance reporting of unclaimed client money and applying inactivity fees if permitted.',
+    tables: ['TradingAccount', 'Deal', 'UserSession'],
+    indexes: ['TradingAccount_login_key', 'Deal_accountId_idx', 'UserSession_userId_idx'],
+    sensitivity: 'Low',
+    diagnosticNotes: [
+      'Lists accounts with cash balances (> $0.00) where the user hasn\'t logged in or traded for at least 90 days.',
+      'Calculates the exact number of days since the user\'s last trade or login session.',
+      'Helps compliance teams contact customers or handle unclaimed funds according to financial regulations.'
+    ],
+    generateSql: ({ loginId, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
+      return `-- =====================================================================
+-- Scenario: Dormant / Abandoned Accounts with Positive Withdrawable Balance
+-- Target: TradingAccount (status = 'ACTIVE', balance > 0, inactive > 90 days)
+-- =====================================================================
+
+WITH LastActivity AS (
+    SELECT
+        ta.id                                   AS account_id,
+        MAX(d."createdAt")                      AS last_deal_time,
+        MAX(us."createdAt")                     AS last_session_time
+    FROM "TradingAccount" ta
+    LEFT JOIN "Deal" d ON d."accountId" = ta.id
+    LEFT JOIN "UserSession" us ON us."userId" = ta."userId"
+    GROUP BY ta.id
+)
+SELECT
+    ta.login                                    AS account_login,
+    ta.name                                     AS account_name,
+    ta.status                                   AS account_status,
+    ta.currency                                 AS currency,
+    ta.balance                                  AS dormant_balance,
+    la.last_deal_time                           AS last_trade_executed,
+    la.last_session_time                        AS last_user_login,
+    GREATEST(la.last_deal_time, la.last_session_time, ta."createdAt") AS last_known_activity,
+    EXTRACT(DAY FROM NOW() - GREATEST(la.last_deal_time, la.last_session_time, ta."createdAt"))::int AS days_dormant
+FROM "TradingAccount" ta
+JOIN LastActivity la ON la.account_id = ta.id
+WHERE ta.status = 'ACTIVE'
+  AND ta.balance > 0.00
+  AND (
+      GREATEST(la.last_deal_time, la.last_session_time, ta."createdAt") < NOW() - INTERVAL '90 days'
+      OR GREATEST(la.last_deal_time, la.last_session_time, ta."createdAt") IS NULL
+  )
+  AND (
+      ta.login = ${loginVal}
+      OR ${loginVal} = 100234
+  )
+ORDER BY ta.balance DESC
+LIMIT 100;`;
+    }
+  },
+  {
+    id: 'consolidated-portfolio-exposure',
+    category: 'Risk',
+    title: 'Combined Multi-Account Overview for One User (Global Exposure)',
+    description: 'Combines all trading accounts owned by the same person into a single overview. Adds up their total cash balance, combined equity, and all active open trades across every account to show the person\'s true total financial position.',
+    tables: ['TradingAccount', 'User', 'Position'],
+    indexes: ['TradingAccount_userId_idx', 'Position_accountId_idx'],
+    sensitivity: 'High (Financial)',
+    diagnosticNotes: [
+      'Combines all separate logins and accounts belonging to the same registered person.',
+      'Shows overall cash balance, total equity, and net trade directions across all their accounts.',
+      'Catches clients trying to get around single-account maximum trade size limits by spreading trades across multiple accounts.'
+    ],
+    generateSql: ({ loginId, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : 100234);
+      return `-- =====================================================================
+-- Scenario: Consolidated Multi-Account Portfolio & Global Exposure
+-- Target: All accounts sharing the same User.id as login = ${loginVal}
+-- =====================================================================
+
+WITH TargetUser AS (
+    SELECT "userId" 
+    FROM "TradingAccount" 
+    WHERE login = ${loginVal} 
+    LIMIT 1
+),
+UserAccounts AS (
+    SELECT 
+        ta.id,
+        ta.login,
+        ta.balance,
+        ta.equity,
+        ta.currency,
+        ta."userId"
+    FROM "TradingAccount" ta
+    WHERE ta."userId" IN (SELECT "userId" FROM TargetUser)
+),
+SymbolExposure AS (
+    SELECT
+        ua."userId",
+        p."externalSymbol" AS symbol,
+        COALESCE(SUM(CASE WHEN p.side = 'BUY' THEN p.volume ELSE 0 END), 0) AS total_buy_lots,
+        COALESCE(SUM(CASE WHEN p.side = 'SELL' THEN p.volume ELSE 0 END), 0) AS total_sell_lots,
+        COALESCE(SUM(CASE WHEN p.side = 'BUY' THEN p.volume ELSE -p.volume END), 0) AS net_directional_lots,
+        COALESCE(SUM(p."floatingPnL"), 0.00) AS symbol_floating_pnl
+    FROM "Position" p
+    JOIN UserAccounts ua ON ua.id = p."accountId"
+    WHERE p.volume > 0
+    GROUP BY ua."userId", p."externalSymbol"
+)
+SELECT
+    u.id                                        AS user_id,
+    u.email                                     AS user_email,
+    COUNT(DISTINCT ua.id)                       AS total_trading_logins,
+    SUM(ua.balance)                             AS consolidated_balance,
+    SUM(ua.equity)                              AS consolidated_equity,
+    se.symbol                                   AS instrument,
+    se.total_buy_lots                           AS aggregate_buy_lots,
+    se.total_sell_lots                          AS aggregate_sell_lots,
+    se.net_directional_lots                     AS net_directional_lots,
+    se.symbol_floating_pnl                      AS combined_floating_pnl
+FROM "User" u
+JOIN UserAccounts ua ON ua."userId" = u.id
+LEFT JOIN SymbolExposure se ON se."userId" = u.id
+GROUP BY u.id, u.email, se.symbol, se.total_buy_lots, se.total_sell_lots, se.net_directional_lots, se.symbol_floating_pnl
+ORDER BY ABS(COALESCE(se.net_directional_lots, 0)) DESC;`;
+    }
+  },
+  {
+    id: 'cross-account-hedging-arbitrage',
+    category: 'Security',
+    title: 'Opposite Trades Across Multiple Accounts (A/B Hedging Abuse)',
+    description: 'Catches users trying to exploit negative balance protection or promotional bonuses. A user opens Account A and buys an asset, while opening Account B and selling the exact same asset. If a major news event causes prices to spike, one account makes massive profits while the broker absorbs the loss on the other.',
+    tables: ['TradingAccount', 'Position', 'User'],
+    indexes: ['TradingAccount_userId_idx', 'Position_accountId_idx'],
+    sensitivity: 'High (Financial)',
+    diagnosticNotes: [
+      'Flags simultaneous opposite trades (one buying, one selling the same asset) under the same user.',
+      'Detects attempts to guarantee profit by letting one account go negative while cashing out gains on the other.',
+      'Matches trades within a 25% size tolerance on the same market symbol.'
+    ],
+    generateSql: () => {
+      return `-- =====================================================================
+-- Scenario: Cross-Account Hedging & Negative Balance Arbitrage (A/B Hedging)
+-- Target: TradingAccounts under same User with simultaneous opposite positions
+-- =====================================================================
+
+SELECT
+    u.id                                        AS user_id,
+    u.email                                     AS user_email,
+    ta1.login                                   AS buy_account_login,
+    p1.id                                       AS buy_position_id,
+    p1."externalSymbol"                         AS symbol,
+    p1.volume                                   AS buy_lots,
+    p1."openPrice"                              AS buy_open_price,
+    p1."floatingPnL"                            AS buy_floating_pnl,
+    ta2.login                                   AS sell_account_login,
+    p2.id                                       AS sell_position_id,
+    p2.volume                                   AS sell_lots,
+    p2."openPrice"                              AS sell_open_price,
+    p2."floatingPnL"                            AS sell_floating_pnl,
+    ROUND(ABS(p1.volume - p2.volume), 2)        AS lot_differential,
+    (p1."floatingPnL" + p2."floatingPnL")       AS net_hedged_pnl
+FROM "Position" p1
+JOIN "TradingAccount" ta1 ON ta1.id = p1."accountId"
+JOIN "User" u ON u.id = ta1."userId"
+JOIN "TradingAccount" ta2 ON ta2."userId" = u.id AND ta2.id != ta1.id
+JOIN "Position" p2 ON p2."accountId" = ta2.id AND p2."externalSymbol" = p1."externalSymbol"
+WHERE p1.side = 'BUY'
+  AND p2.side = 'SELL'
+  AND p1.volume > 0
+  AND p2.volume > 0
+  AND ABS(p1.volume - p2.volume) <= 0.25 * GREATEST(p1.volume, p2.volume)
+ORDER BY (p1.volume + p2.volume) DESC;`;
+    }
+  },
+  {
+    id: 'syndicate-arbitrage-execution',
+    category: 'Security',
+    title: 'Coordinated Multi-Account Group Trading (Syndicate Arbitrage)',
+    description: 'Discovers groups of separate people placing identical trades on the exact same market symbol within 1 to 3 seconds of each other from the same internet connection or device. Uncovers unauthorized trading syndicates, coordinated copy-trading rings, or shared trading bots.',
+    tables: ['TradingAccount', 'UserSession', 'Order', 'User'],
+    indexes: ['UserSession_ipAddress_idx', 'Order_accountId_idx', 'Order_createdAt_idx'],
+    sensitivity: 'High (Security/PII)',
+    diagnosticNotes: [
+      'Spots different registered users placing the exact same trade within 3 seconds of each other.',
+      'Checks if both users are connected from the exact same internet IP address or shared network.',
+      'Helps detect coordinated groups, unauthorized fund managers, or shared trading software.'
+    ],
+    generateSql: () => {
+      return `-- =====================================================================
+-- Scenario: Coordinated Multi-Account Trade Execution (Syndicate Arbitrage)
+-- Target: Multiple distinct Users executing identical orders from shared IP within 3s
+-- =====================================================================
+
+SELECT
+    o1.id                                       AS order_id_1,
+    ta1.login                                   AS account_login_1,
+    u1.email                                    AS user_email_1,
+    o2.id                                       AS order_id_2,
+    ta2.login                                   AS account_login_2,
+    u2.email                                    AS user_email_2,
+    o1."externalSymbol"                         AS symbol,
+    o1."orderType"                              AS order_type,
+    o1."orderVolume"                            AS volume_1,
+    o2."orderVolume"                            AS volume_2,
+    us1."ipAddress"                             AS shared_ip_address,
+    o1."createdAt"                              AS order_1_time,
+    o2."createdAt"                              AS order_2_time,
+    ROUND(ABS(EXTRACT(EPOCH FROM (o1."createdAt" - o2."createdAt")))::numeric, 3) AS execution_time_delta_sec
+FROM "Order" o1
+JOIN "TradingAccount" ta1 ON ta1.id = o1."accountId"
+JOIN "User" u1 ON u1.id = ta1."userId"
+JOIN "UserSession" us1 ON us1."userId" = u1.id
+JOIN "UserSession" us2 ON us2."ipAddress" = us1."ipAddress" AND us2."userId" != us1.id
+JOIN "User" u2 ON u2.id = us2."userId"
+JOIN "TradingAccount" ta2 ON ta2."userId" = u2.id
+JOIN "Order" o2 ON o2."accountId" = ta2.id 
+               AND o2."externalSymbol" = o1."externalSymbol" 
+               AND o2."orderType" = o1."orderType"
+               AND o2.id > o1.id
+WHERE o1."createdAt" >= NOW() - INTERVAL '7 days'
+  AND ABS(EXTRACT(EPOCH FROM (o1."createdAt" - o2."createdAt"))) <= 3.0
+ORDER BY o1."createdAt" DESC
+LIMIT 100;`;
+    }
+  },
+  {
+    id: 'negative-balance-debt-forgiveness',
+    category: 'Funds',
+    title: 'Zero-Out Approved Negative Balances (Debt Forgiveness Script)',
+    description: 'A safe database cleanup script that resets negative balances back to $0.00 on closed, suspended, or read-only accounts that have been approved for broker debt forgiveness. Cleans up client debt and updates the audit timestamp.',
+    tables: ['TradingAccount'],
+    indexes: ['TradingAccount_login_key', 'TradingAccount_type_idx'],
+    sensitivity: 'High (Financial)',
+    diagnosticNotes: [
+      'Database cleanup action: Safely resets negative balances back to $0.00 for approved accounts.',
+      'Only touches accounts in CLOSED, READ_ONLY, or SUSPENDED status that have balances below $0.00.',
+      'Keeps an accurate audit trail by updating the account\'s last-modified timestamp (updatedAt = NOW()).'
+    ],
+    generateSql: ({ loginId, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : null);
+      const loginClause = loginVal ? `\n    AND "login" = ${loginVal}` : '';
+      return `-- =====================================================================
+-- Scenario: Negative Balance Debt Forgiveness & Zero-Out
+-- Target: TradingAccount (balance < 0 and status IN ('CLOSED', 'READ_ONLY', 'SUSPENDED'))
+-- =====================================================================
+
+UPDATE "TradingAccount"
+SET
+    "balance" = 0.00,
+    "equity" = CASE WHEN "equity" < 0 THEN 0.00 ELSE "equity" END,
+    "updatedAt" = NOW()
+WHERE "balance" < 0.00
+  AND "status" IN ('CLOSED', 'READ_ONLY', 'SUSPENDED')${loginClause};`;
+    }
+  },
+  {
+    id: 'cancel-orphan-pending-orders',
+    category: 'Trading',
+    title: 'Cancel Leftover Pending Orders on Frozen / Closed Accounts',
+    description: 'Safely cancels leftover pending orders (orders waiting for a specific price) on accounts that have been suspended, locked, or closed. This prevents old orders from accidentally triggering in the market when the customer is no longer allowed to trade.',
+    tables: ['Order', 'TradingAccount'],
+    indexes: ['Order_accountId_idx', 'TradingAccount_login_key'],
+    sensitivity: 'Medium',
+    diagnosticNotes: [
+      'Database cleanup action: Marks waiting pending orders as CANCELLED on locked, frozen, or closed accounts.',
+      'Prevents accidental trade fills on accounts where the customer no longer has active access.',
+      'Records an audit cancellation reason (ACCOUNT_STATUS_INACTIVE_ORPHAN_PURGE) for tracking.'
+    ],
+    generateSql: ({ loginId, parameterized }) => {
+      const loginVal = parameterized ? ':loginId' : (loginId ? Number(loginId) : null);
+      const loginClause = loginVal ? `\n      AND ta."login" = ${loginVal}` : '';
+      return `-- =====================================================================
+-- Scenario: Cancel Orphan Pending Orders on Suspended / Closed Accounts
+-- Target: Order (status = 'PENDING' on accounts with status != 'ACTIVE')
+-- =====================================================================
+
+UPDATE "Order"
+SET
+    "status" = 'CANCELLED',
+    "rejectionReason" = 'ACCOUNT_STATUS_INACTIVE_ORPHAN_PURGE',
+    "updatedAt" = NOW()
+WHERE "status" = 'PENDING'
+  AND "accountId" IN (
+      SELECT ta.id
+      FROM "TradingAccount" ta
+      WHERE ta."status" IN ('SUSPENDED', 'READ_ONLY', 'CLOSED')${loginClause}
+  );`;
     }
   }
 ];
@@ -1363,43 +1955,615 @@ ORDER BY ABS(p."floatingPnL") DESC;`
     };
   }
 
-  // 10. REMOVE DEMO FROM LIVE ACCOUNTS
-  if (
-    p.includes('demo') &&
-    (p.includes('remove') || p.includes('delete') || p.includes('strip') || p.includes('clean') || p.includes('live'))
-  ) {
+  // 10. REMOVE SPECIFIC WORD (e.g. "demo", "the", "test", etc.) FROM LIVE ACCOUNTS
+  const isWordRemovalPrompt =
+    (p.includes('remove') || p.includes('delete') || p.includes('strip') || p.includes('clean') || p.includes('drop')) &&
+    (p.includes('live') || p.includes('account') || p.includes('name') || p.includes('word') || p.includes('demo'));
+
+  if (isWordRemovalPrompt) {
+    const match =
+      prompt.match(/(?:remove|strip|delete|clean|drop)\s+(?:the\s+)?word\s+["'“]?([a-zA-Z0-9_\-]+)["'”]?/i) ||
+      prompt.match(/(?:remove|strip|delete|clean|drop)\s+["'“]([a-zA-Z0-9_\-]+)["'”]\s+(?:from|in|of)/i) ||
+      prompt.match(/(?:remove|strip|delete|clean|drop)\s+([a-zA-Z0-9_\-]+)\s+(?:from|in|of)\s+(?:all\s+)?(?:the\s+)?(?:live\s+)?(?:accounts?|names?)/i) ||
+      (p.includes('demo') ? ['demo', 'demo'] : null);
+
+    const targetWord = match && match[1] ? match[1].trim() : (p.includes('demo') ? 'demo' : 'the');
+
     return {
       metadata: {
         tables: ['TradingAccount'],
         indexes: ['TradingAccount_type_idx', 'TradingAccount_name_idx'],
         sensitivity: 'High (Security/PII)',
         diagnosticNotes: [
-          'Executes regex replacement with word boundary check \\ydemo\\y case-insensitively.',
+          `Executes regex replacement with word boundary check \\y${targetWord}\\y case-insensitively.`,
           'Cleans redundant whitespace with TRIM and REGEXP_REPLACE(\\s+, " ").',
-          'Only updates records with "type" = \'LIVE\' containing "demo".'
+          `Only updates records with "type" = 'LIVE' containing "${targetWord}".`
         ]
       },
       sql: `-- =====================================================================
--- Custom Query: Remove the word "demo" from all the live accounts
+-- Custom Query: Remove the word "${targetWord}" from all the live accounts
 -- Prompt: "${prompt}"
--- Target: TradingAccount (type = 'LIVE' and name ILIKE '%demo%')
+-- Target: TradingAccount (type = 'LIVE' and name ILIKE '%${targetWord}%')
 -- =====================================================================
 
 UPDATE "TradingAccount"
     SET
         "name" = TRIM(
             REGEXP_REPLACE(
-                REGEXP_REPLACE("name", '\\ydemo\\y', '', 'gi'),
+                REGEXP_REPLACE("name", '\\y${targetWord}\\y', '', 'gi'),
                 '\\s+', ' ', 'g'
             )
         ),
         "updatedAt" = NOW()
     WHERE "type" = 'LIVE'
-      AND "name" ILIKE '%demo%';`
+      AND "name" ILIKE '%${targetWord}%';`
     };
   }
 
-  // 11. GENERAL FALLBACK AD-HOC INVESTIGATION
+  // 11. LIVE BALANCE VS. EQUITY DRIFT DETECTION
+  if (
+    p.includes('drift') ||
+    (p.includes('equity') && p.includes('balance') && (p.includes('sync') || p.includes('mismatch') || p.includes('differ') || p.includes('desync')))
+  ) {
+    return {
+      metadata: {
+        tables: ['TradingAccount', 'Position'],
+        indexes: ['TradingAccount_login_key', 'Position_accountId_idx'],
+        sensitivity: 'High (Financial)',
+        diagnosticNotes: [
+          'Calculates discrepancy between stored account equity and live mark-to-market (balance + floating PnL).',
+          'Flags accounts with ABS(equity_drift) > 0.05 as DESYNC_ANOMALY.',
+          'Identifies corrupted quote engine cache or orphaned mark-to-market calculations.'
+        ]
+      },
+      sql: `-- =====================================================================
+-- Custom Query: Live Balance vs. Equity Drift Detection
+-- Prompt: "${prompt}"
+-- Target: TradingAccount login = ${loginVal} (or all accounts with discrepancy)
+-- =====================================================================
+
+WITH PositionAggregates AS (
+    SELECT
+        p."accountId",
+        COUNT(p.id)                               AS open_position_count,
+        COALESCE(SUM(p."floatingPnL"), 0.00)      AS total_floating_pnl,
+        COALESCE(SUM(p.swap), 0.00)              AS total_swap,
+        COALESCE(SUM(p.commission), 0.00)        AS total_commission
+    FROM "Position" p
+    WHERE p.volume > 0
+    GROUP BY p."accountId"
+)
+SELECT
+    ta.login                                    AS account_login,
+    ta.name                                     AS account_name,
+    ta.status                                   AS account_status,
+    ta.currency                                 AS currency,
+    ta.balance                                  AS recorded_balance,
+    ta.equity                                   AS recorded_equity,
+    COALESCE(pa.open_position_count, 0)         AS active_positions,
+    COALESCE(pa.total_floating_pnl, 0.00)       AS live_floating_pnl,
+    ROUND(ta.balance + COALESCE(pa.total_floating_pnl, 0.00), 2) AS expected_equity,
+    ROUND(ta.equity - (ta.balance + COALESCE(pa.total_floating_pnl, 0.00)), 2) AS equity_drift,
+    CASE
+        WHEN ABS(ta.equity - (ta.balance + COALESCE(pa.total_floating_pnl, 0.00))) > 0.05 THEN 'DESYNC_ANOMALY'
+        ELSE 'SYNCHRONIZED'
+    END                                         AS sync_status
+FROM "TradingAccount" ta
+LEFT JOIN PositionAggregates pa ON pa."accountId" = ta.id
+WHERE (
+    ta.login = ${loginVal}
+    OR ABS(ta.equity - (ta.balance + COALESCE(pa.total_floating_pnl, 0.00))) > 0.05
+)
+ORDER BY ABS(ta.equity - (ta.balance + COALESCE(pa.total_floating_pnl, 0.00))) DESC;`
+    };
+  }
+
+  // 12. NEGATIVE BALANCE PROTECTION (NBP) ELIGIBILITY & DEFICITS
+  if (
+    p.includes('nbp') ||
+    (p.includes('negative balance') && (p.includes('eligib') || p.includes('deficit') || p.includes('protect') || p.includes('unprocessed')))
+  ) {
+    return {
+      metadata: {
+        tables: ['TradingAccount', 'FundTransaction', 'Position'],
+        indexes: ['TradingAccount_login_key', 'FundTransaction_accountId_idx'],
+        sensitivity: 'High (Financial)',
+        diagnosticNotes: [
+          'Finds accounts with balance < 0 caused by weekend price gaps or slippage.',
+          'Verifies whether open positions remain prior to applying NBP adjustment.',
+          'Filters accounts that have not received an NBP credit within 14 days.'
+        ]
+      },
+      sql: `-- =====================================================================
+-- Custom Query: Negative Balance Protection (NBP) Eligibility & Deficits
+-- Prompt: "${prompt}"
+-- Target: TradingAccount (balance < 0 and no recent NBP credit transaction)
+-- =====================================================================
+
+SELECT
+    ta.id                                       AS account_id,
+    ta.login                                    AS account_login,
+    ta.name                                     AS account_name,
+    ta.status                                   AS account_status,
+    ta.currency                                 AS currency,
+    ta.balance                                  AS deficit_balance,
+    ta.equity                                   AS current_equity,
+    (
+        SELECT COUNT(*)
+        FROM "Position" p
+        WHERE p."accountId" = ta.id AND p.volume > 0
+    )                                           AS open_positions,
+    (
+        SELECT COUNT(*)
+        FROM "FundTransaction" ft
+        WHERE ft."accountId" = ta.id
+          AND ft.type = 'NEGATIVE_BALANCE_PROTECTION'
+          AND ft.status IN ('PENDING', 'PROCESSING', 'COMPLETED')
+    )                                           AS existing_nbp_adjustments,
+    ta."createdAt"                              AS account_created_at
+FROM "TradingAccount" ta
+WHERE ta.balance < 0.00
+  AND (
+      ta.login = ${loginVal}
+      OR ta.status != 'CLOSED'
+  )
+  AND NOT EXISTS (
+      SELECT 1
+      FROM "FundTransaction" ft
+      WHERE ft."accountId" = ta.id
+        AND ft.type = 'NEGATIVE_BALANCE_PROTECTION'
+        AND ft.status IN ('PENDING', 'PROCESSING', 'COMPLETED')
+        AND ft."createdAt" >= NOW() - INTERVAL '14 days'
+  )
+ORDER BY ta.balance ASC;`
+    };
+  }
+
+  // 13. FULL CASH LEDGER VS. ACCOUNT BALANCE RECONCILIATION
+  if (
+    (p.includes('ledger') || p.includes('reconcil')) &&
+    (p.includes('balance') || p.includes('cash') || p.includes('deposit') || p.includes('full'))
+  ) {
+    return {
+      metadata: {
+        tables: ['TradingAccount', 'FundTransaction', 'Deal', 'Position'],
+        indexes: ['TradingAccount_login_key', 'FundTransaction_accountId_idx', 'Deal_accountId_idx'],
+        sensitivity: 'High (Financial)',
+        diagnosticNotes: [
+          'Full ledger audit: (Deposits - Withdrawals) + Realized Deal Profits - Commissions - Swaps.',
+          'Compares theoretical cash sum against stored TradingAccount.balance.',
+          'Discovers unauthorized balance modifications, double credits, or missing settlement items.'
+        ]
+      },
+      sql: `-- =====================================================================
+-- Custom Query: Full Cash Ledger vs. Account Balance Reconciliation
+-- Prompt: "${prompt}"
+-- Target: TradingAccount login = ${loginVal}
+-- =====================================================================
+
+WITH LedgerFundTxs AS (
+    SELECT
+        ft."accountId",
+        COALESCE(SUM(CASE WHEN ft.type = 'DEPOSIT' AND ft.status = 'COMPLETED' THEN ft.amount ELSE 0 END), 0.00) AS total_deposits,
+        COALESCE(SUM(CASE WHEN ft.type = 'WITHDRAWAL' AND ft.status = 'COMPLETED' THEN ft.amount ELSE 0 END), 0.00) AS total_withdrawals,
+        COALESCE(SUM(CASE WHEN ft.type = 'CREDIT_CORRECTION' AND ft.status = 'COMPLETED' THEN ft.amount ELSE 0 END), 0.00) AS total_credits,
+        COALESCE(SUM(CASE WHEN ft.type = 'NEGATIVE_BALANCE_PROTECTION' AND ft.status = 'COMPLETED' THEN ft.amount ELSE 0 END), 0.00) AS total_nbp
+    FROM "FundTransaction" ft
+    GROUP BY ft."accountId"
+),
+LedgerDeals AS (
+    SELECT
+        d."accountId",
+        COALESCE(SUM(
+            CASE 
+                WHEN d.entry IN ('OUT', 'IN_OUT') THEN (d."executionPrice" - d."requestedPrice") * d.volume
+                ELSE 0.00 
+            END
+        ), 0.00) AS total_realized_profit
+    FROM "Deal" d
+    GROUP BY d."accountId"
+),
+LedgerPositions AS (
+    SELECT
+        p."accountId",
+        COALESCE(SUM(p.swap), 0.00) AS total_swaps,
+        COALESCE(SUM(p.commission), 0.00) AS total_commissions
+    FROM "Position" p
+    GROUP BY p."accountId"
+)
+SELECT
+    ta.login                                    AS account_login,
+    ta.name                                     AS account_name,
+    ta.balance                                  AS recorded_balance,
+    COALESCE(lft.total_deposits, 0.00)          AS total_deposits,
+    COALESCE(lft.total_withdrawals, 0.00)       AS total_withdrawals,
+    COALESCE(lft.total_credits, 0.00)           AS total_credits,
+    COALESCE(lft.total_nbp, 0.00)               AS total_nbp_adjustments,
+    COALESCE(ld.total_realized_profit, 0.00)    AS total_realized_deal_profit,
+    COALESCE(lp.total_swaps, 0.00)              AS total_swaps_charged,
+    COALESCE(lp.total_commissions, 0.00)        AS total_commissions_charged,
+    ROUND(
+        (COALESCE(lft.total_deposits, 0) - COALESCE(lft.total_withdrawals, 0) + COALESCE(lft.total_credits, 0) + COALESCE(lft.total_nbp, 0))
+        + COALESCE(ld.total_realized_profit, 0) 
+        - COALESCE(lp.total_commissions, 0) 
+        - COALESCE(lp.total_swaps, 0),
+        2
+    )                                           AS calculated_theoretical_balance,
+    ROUND(
+        ta.balance - (
+            (COALESCE(lft.total_deposits, 0) - COALESCE(lft.total_withdrawals, 0) + COALESCE(lft.total_credits, 0) + COALESCE(lft.total_nbp, 0))
+            + COALESCE(ld.total_realized_profit, 0) 
+            - COALESCE(lp.total_commissions, 0) 
+            - COALESCE(lp.total_swaps, 0)
+        ),
+        2
+    )                                           AS balance_discrepancy
+FROM "TradingAccount" ta
+LEFT JOIN LedgerFundTxs lft ON lft."accountId" = ta.id
+LEFT JOIN LedgerDeals ld ON ld."accountId" = ta.id
+LEFT JOIN LedgerPositions lp ON lp."accountId" = ta.id
+WHERE ta.login = ${loginVal}
+ORDER BY ABS(ta.balance) DESC;`
+    };
+  }
+
+  // 14. SUSPENDED / READ-ONLY ACCOUNTS WITH STRANDED OPEN POSITIONS
+  if (
+    p.includes('stranded') ||
+    (p.includes('position') && (p.includes('suspended') || p.includes('read_only') || p.includes('read only') || p.includes('frozen')))
+  ) {
+    return {
+      metadata: {
+        tables: ['TradingAccount', 'Position', 'User'],
+        indexes: ['TradingAccount_type_idx', 'Position_accountId_idx'],
+        sensitivity: 'High (Financial)',
+        diagnosticNotes: [
+          'High operational risk: suspended or frozen accounts still holding open positions.',
+          'Clients cannot manage market volatility due to administrative lockouts.',
+          'Identifies position volume, symbol, and total floating PnL.'
+        ]
+      },
+      sql: `-- =====================================================================
+-- Custom Query: Suspended / Read-Only Accounts with Stranded Open Positions
+-- Prompt: "${prompt}"
+-- Target: TradingAccount status IN ('SUSPENDED', 'READ_ONLY') with active positions
+-- =====================================================================
+
+SELECT
+    ta.login                                    AS account_login,
+    ta.name                                     AS account_name,
+    ta.status                                   AS account_status,
+    u.email                                     AS client_email,
+    p.id                                        AS position_id,
+    p."externalSymbol"                          AS symbol,
+    p.side                                      AS side,
+    p.volume                                    AS lot_size,
+    p."openPrice"                               AS open_price,
+    p."currentPrice"                            AS current_price,
+    p."floatingPnL"                             AS floating_pnl,
+    p."createdAt"                               AS position_opened_at,
+    ROUND(EXTRACT(EPOCH FROM (NOW() - p."createdAt")) / 3600::numeric, 1) AS hours_stranded
+FROM "TradingAccount" ta
+JOIN "User" u ON u.id = ta."userId"
+JOIN "Position" p ON p."accountId" = ta.id
+WHERE ta.status IN ('SUSPENDED', 'READ_ONLY')
+  AND p.volume > 0
+ORDER BY ABS(p."floatingPnL") DESC, p."createdAt" ASC;`
+    };
+  }
+
+  // 15. DORMANT / ABANDONED ACCOUNTS WITH POSITIVE WITHDRAWABLE BALANCE
+  if (
+    p.includes('dormant') ||
+    p.includes('abandoned') ||
+    (p.includes('inactive') && (p.includes('balance') || p.includes('positive') || p.includes('days')))
+  ) {
+    return {
+      metadata: {
+        tables: ['TradingAccount', 'Deal', 'UserSession'],
+        indexes: ['TradingAccount_login_key', 'Deal_accountId_idx', 'UserSession_userId_idx'],
+        sensitivity: 'Low',
+        diagnosticNotes: [
+          'Identifies accounts with positive balance and zero trading activity or user sessions for >90 days.',
+          'Audits MAX(Deal.createdAt) and MAX(UserSession.createdAt) for exact dormancy timestamp.',
+          'Assists with regulatory compliance for unclaimed assets and dormancy fee management.'
+        ]
+      },
+      sql: `-- =====================================================================
+-- Custom Query: Dormant / Abandoned Accounts with Positive Withdrawable Balance
+-- Prompt: "${prompt}"
+-- Target: TradingAccount (status = 'ACTIVE', balance > 0, inactive > 90 days)
+-- =====================================================================
+
+WITH LastActivity AS (
+    SELECT
+        ta.id                                   AS account_id,
+        MAX(d."createdAt")                      AS last_deal_time,
+        MAX(us."createdAt")                     AS last_session_time
+    FROM "TradingAccount" ta
+    LEFT JOIN "Deal" d ON d."accountId" = ta.id
+    LEFT JOIN "UserSession" us ON us."userId" = ta."userId"
+    GROUP BY ta.id
+)
+SELECT
+    ta.login                                    AS account_login,
+    ta.name                                     AS account_name,
+    ta.status                                   AS account_status,
+    ta.currency                                 AS currency,
+    ta.balance                                  AS dormant_balance,
+    la.last_deal_time                           AS last_trade_executed,
+    la.last_session_time                        AS last_user_login,
+    GREATEST(la.last_deal_time, la.last_session_time, ta."createdAt") AS last_known_activity,
+    EXTRACT(DAY FROM NOW() - GREATEST(la.last_deal_time, la.last_session_time, ta."createdAt"))::int AS days_dormant
+FROM "TradingAccount" ta
+JOIN LastActivity la ON la.account_id = ta.id
+WHERE ta.status = 'ACTIVE'
+  AND ta.balance > 0.00
+  AND (
+      GREATEST(la.last_deal_time, la.last_session_time, ta."createdAt") < NOW() - INTERVAL '90 days'
+      OR GREATEST(la.last_deal_time, la.last_session_time, ta."createdAt") IS NULL
+  )
+ORDER BY ta.balance DESC
+LIMIT 100;`
+    };
+  }
+
+  // 16. CONSOLIDATED MULTI-ACCOUNT PORTFOLIO & GLOBAL EXPOSURE
+  if (
+    p.includes('consolidat') ||
+    p.includes('portfolio') ||
+    p.includes('global exposure') ||
+    (p.includes('multi-account') && (p.includes('exposure') || p.includes('net') || p.includes('global')))
+  ) {
+    return {
+      metadata: {
+        tables: ['TradingAccount', 'User', 'Position'],
+        indexes: ['TradingAccount_userId_idx', 'Position_accountId_idx'],
+        sensitivity: 'High (Financial)',
+        diagnosticNotes: [
+          'Calculates consolidated client equity and net directional risk across multiple trading logins.',
+          'Groups positions by instrument to evaluate net buy lots vs net sell lots per natural user.',
+          'Discovers traders evading maximum exposure limits across secondary logins.'
+        ]
+      },
+      sql: `-- =====================================================================
+-- Custom Query: Consolidated Multi-Account Portfolio & Global Exposure
+-- Prompt: "${prompt}"
+-- Target: All accounts sharing the same User.id as login = ${loginVal}
+-- =====================================================================
+
+WITH TargetUser AS (
+    SELECT "userId" 
+    FROM "TradingAccount" 
+    WHERE login = ${loginVal} 
+    LIMIT 1
+),
+UserAccounts AS (
+    SELECT 
+        ta.id,
+        ta.login,
+        ta.balance,
+        ta.equity,
+        ta.currency,
+        ta."userId"
+    FROM "TradingAccount" ta
+    WHERE ta."userId" IN (SELECT "userId" FROM TargetUser)
+),
+SymbolExposure AS (
+    SELECT
+        ua."userId",
+        p."externalSymbol" AS symbol,
+        COALESCE(SUM(CASE WHEN p.side = 'BUY' THEN p.volume ELSE 0 END), 0) AS total_buy_lots,
+        COALESCE(SUM(CASE WHEN p.side = 'SELL' THEN p.volume ELSE 0 END), 0) AS total_sell_lots,
+        COALESCE(SUM(CASE WHEN p.side = 'BUY' THEN p.volume ELSE -p.volume END), 0) AS net_directional_lots,
+        COALESCE(SUM(p."floatingPnL"), 0.00) AS symbol_floating_pnl
+    FROM "Position" p
+    JOIN UserAccounts ua ON ua.id = p."accountId"
+    WHERE p.volume > 0
+    GROUP BY ua."userId", p."externalSymbol"
+)
+SELECT
+    u.id                                        AS user_id,
+    u.email                                     AS user_email,
+    COUNT(DISTINCT ua.id)                       AS total_trading_logins,
+    SUM(ua.balance)                             AS consolidated_balance,
+    SUM(ua.equity)                              AS consolidated_equity,
+    se.symbol                                   AS instrument,
+    se.total_buy_lots                           AS aggregate_buy_lots,
+    se.total_sell_lots                          AS aggregate_sell_lots,
+    se.net_directional_lots                     AS net_directional_lots,
+    se.symbol_floating_pnl                      AS combined_floating_pnl
+FROM "User" u
+JOIN UserAccounts ua ON ua."userId" = u.id
+LEFT JOIN SymbolExposure se ON se."userId" = u.id
+GROUP BY u.id, u.email, se.symbol, se.total_buy_lots, se.total_sell_lots, se.net_directional_lots, se.symbol_floating_pnl
+ORDER BY ABS(COALESCE(se.net_directional_lots, 0)) DESC;`
+    };
+  }
+
+  // 17. CROSS-ACCOUNT HEDGING & NEGATIVE BALANCE ARBITRAGE (A/B HEDGING)
+  if (
+    p.includes('a/b') ||
+    p.includes('cross-account') ||
+    (p.includes('hedg') && (p.includes('arbitrage') || p.includes('opposite') || p.includes('negative balance')))
+  ) {
+    return {
+      metadata: {
+        tables: ['TradingAccount', 'Position', 'User'],
+        indexes: ['TradingAccount_userId_idx', 'Position_accountId_idx'],
+        sensitivity: 'High (Financial)',
+        diagnosticNotes: [
+          'Identifies opposite simultaneous Buy and Sell positions across accounts owned by the same User.',
+          'Detects intentional negative balance generation to harvest profit on paired hedging login.',
+          'Audits volume differential and combined floating PnL.'
+        ]
+      },
+      sql: `-- =====================================================================
+-- Custom Query: Cross-Account Hedging & Negative Balance Arbitrage (A/B Hedging)
+-- Prompt: "${prompt}"
+-- Target: TradingAccounts under same User with simultaneous opposite positions
+-- =====================================================================
+
+SELECT
+    u.id                                        AS user_id,
+    u.email                                     AS user_email,
+    ta1.login                                   AS buy_account_login,
+    p1.id                                       AS buy_position_id,
+    p1."externalSymbol"                         AS symbol,
+    p1.volume                                   AS buy_lots,
+    p1."openPrice"                              AS buy_open_price,
+    p1."floatingPnL"                            AS buy_floating_pnl,
+    ta2.login                                   AS sell_account_login,
+    p2.id                                       AS sell_position_id,
+    p2.volume                                   AS sell_lots,
+    p2."openPrice"                              AS sell_open_price,
+    p2."floatingPnL"                            AS sell_floating_pnl,
+    ROUND(ABS(p1.volume - p2.volume), 2)        AS lot_differential,
+    (p1."floatingPnL" + p2."floatingPnL")       AS net_hedged_pnl
+FROM "Position" p1
+JOIN "TradingAccount" ta1 ON ta1.id = p1."accountId"
+JOIN "User" u ON u.id = ta1."userId"
+JOIN "TradingAccount" ta2 ON ta2."userId" = u.id AND ta2.id != ta1.id
+JOIN "Position" p2 ON p2."accountId" = ta2.id AND p2."externalSymbol" = p1."externalSymbol"
+WHERE p1.side = 'BUY'
+  AND p2.side = 'SELL'
+  AND p1.volume > 0
+  AND p2.volume > 0
+  AND ABS(p1.volume - p2.volume) <= 0.25 * GREATEST(p1.volume, p2.volume)
+ORDER BY (p1.volume + p2.volume) DESC;`
+    };
+  }
+
+  // 18. COORDINATED MULTI-ACCOUNT TRADE EXECUTION (SYNDICATE ARBITRAGE)
+  if (
+    p.includes('syndicate') ||
+    p.includes('coordinated') ||
+    (p.includes('shared ip') && (p.includes('order') || p.includes('trade') || p.includes('copy'))) ||
+    (p.includes('same ip') && p.includes('account'))
+  ) {
+    return {
+      metadata: {
+        tables: ['TradingAccount', 'UserSession', 'Order', 'User'],
+        indexes: ['UserSession_ipAddress_idx', 'Order_accountId_idx', 'Order_createdAt_idx'],
+        sensitivity: 'High (Security/PII)',
+        diagnosticNotes: [
+          'Discovers distinct users placing identical orders on same symbol within 3 seconds from shared IP.',
+          'Identifies syndicate copy-trading networks, money manager pooling, or latency arbitrage rings.',
+          'Correlates UserSession.ipAddress against order execution timestamps.'
+        ]
+      },
+      sql: `-- =====================================================================
+-- Custom Query: Coordinated Multi-Account Trade Execution (Syndicate Arbitrage)
+-- Prompt: "${prompt}"
+-- Target: Multiple distinct Users executing identical orders from shared IP within 3s
+-- =====================================================================
+
+SELECT
+    o1.id                                       AS order_id_1,
+    ta1.login                                   AS account_login_1,
+    u1.email                                    AS user_email_1,
+    o2.id                                       AS order_id_2,
+    ta2.login                                   AS account_login_2,
+    u2.email                                    AS user_email_2,
+    o1."externalSymbol"                         AS symbol,
+    o1."orderType"                              AS order_type,
+    o1."orderVolume"                            AS volume_1,
+    o2."orderVolume"                            AS volume_2,
+    us1."ipAddress"                             AS shared_ip_address,
+    o1."createdAt"                              AS order_1_time,
+    o2."createdAt"                              AS order_2_time,
+    ROUND(ABS(EXTRACT(EPOCH FROM (o1."createdAt" - o2."createdAt")))::numeric, 3) AS execution_time_delta_sec
+FROM "Order" o1
+JOIN "TradingAccount" ta1 ON ta1.id = o1."accountId"
+JOIN "User" u1 ON u1.id = ta1."userId"
+JOIN "UserSession" us1 ON us1."userId" = u1.id
+JOIN "UserSession" us2 ON us2."ipAddress" = us1."ipAddress" AND us2."userId" != us1.id
+JOIN "User" u2 ON u2.id = us2."userId"
+JOIN "TradingAccount" ta2 ON ta2."userId" = u2.id
+JOIN "Order" o2 ON o2."accountId" = ta2.id 
+               AND o2."externalSymbol" = o1."externalSymbol" 
+               AND o2."orderType" = o1."orderType"
+               AND o2.id > o1.id
+WHERE o1."createdAt" >= NOW() - INTERVAL '7 days'
+  AND ABS(EXTRACT(EPOCH FROM (o1."createdAt" - o2."createdAt"))) <= 3.0
+ORDER BY o1."createdAt" DESC
+LIMIT 100;`
+    };
+  }
+
+  // 19. NEGATIVE BALANCE DEBT FORGIVENESS & ZERO-OUT
+  if (
+    p.includes('forgiv') ||
+    p.includes('zero-out') ||
+    p.includes('zero out') ||
+    (p.includes('write-off') && (p.includes('balance') || p.includes('deficit') || p.includes('debt')))
+  ) {
+    const loginClause = loginId ? `\n    AND "login" = ${loginVal}` : '';
+    return {
+      metadata: {
+        tables: ['TradingAccount'],
+        indexes: ['TradingAccount_login_key', 'TradingAccount_type_idx'],
+        sensitivity: 'High (Financial)',
+        diagnosticNotes: [
+          'Remediation DML: Zeros out deficit balance on closed/suspended accounts approved for write-off.',
+          'Only targets accounts with balance < 0 and status IN (\'CLOSED\', \'READ_ONLY\', \'SUSPENDED\').',
+          'Sets updatedAt = NOW() to maintain regulatory audit history.'
+        ]
+      },
+      sql: `-- =====================================================================
+-- Custom Query: Negative Balance Debt Forgiveness & Zero-Out
+-- Prompt: "${prompt}"
+-- Target: TradingAccount (balance < 0 and status IN ('CLOSED', 'READ_ONLY', 'SUSPENDED'))
+-- =====================================================================
+
+UPDATE "TradingAccount"
+SET
+    "balance" = 0.00,
+    "equity" = CASE WHEN "equity" < 0 THEN 0.00 ELSE "equity" END,
+    "updatedAt" = NOW()
+WHERE "balance" < 0.00
+  AND "status" IN ('CLOSED', 'READ_ONLY', 'SUSPENDED')${loginClause};`
+    };
+  }
+
+  // 20. CANCEL ORPHAN PENDING ORDERS ON SUSPENDED / CLOSED ACCOUNTS
+  if (
+    p.includes('orphan') ||
+    (p.includes('cancel') && p.includes('pending') && (p.includes('suspended') || p.includes('closed') || p.includes('inactive')))
+  ) {
+    const loginClause = loginId ? `\n      AND ta."login" = ${loginVal}` : '';
+    return {
+      metadata: {
+        tables: ['Order', 'TradingAccount'],
+        indexes: ['Order_accountId_idx', 'TradingAccount_login_key'],
+        sensitivity: 'Medium',
+        diagnosticNotes: [
+          'Remediation DML: Cancels pending orders left on accounts transitioned to SUSPENDED, READ_ONLY, or CLOSED.',
+          'Prevents LP execution of stale pending orders where client access is frozen.',
+          'Appends audit reason ACCOUNT_STATUS_INACTIVE_ORPHAN_PURGE.'
+        ]
+      },
+      sql: `-- =====================================================================
+-- Custom Query: Cancel Orphan Pending Orders on Suspended / Closed Accounts
+-- Prompt: "${prompt}"
+-- Target: Order (status = 'PENDING' on accounts with status != 'ACTIVE')
+-- =====================================================================
+
+UPDATE "Order"
+SET
+    "status" = 'CANCELLED',
+    "rejectionReason" = 'ACCOUNT_STATUS_INACTIVE_ORPHAN_PURGE',
+    "updatedAt" = NOW()
+WHERE "status" = 'PENDING'
+  AND "accountId" IN (
+      SELECT ta.id
+      FROM "TradingAccount" ta
+      WHERE ta."status" IN ('SUSPENDED', 'READ_ONLY', 'CLOSED')${loginClause}
+  );`
+    };
+  }
+
+  // 21. GENERAL FALLBACK AD-HOC INVESTIGATION
   return {
     metadata: {
       tables: ['TradingAccount', 'Order', 'Deal', 'FundTransaction', 'AuditLog'],

@@ -133,8 +133,8 @@ SCHEMA CONTEXT (Prisma PostgreSQL models):
 
 STRICT RULES FOR SQL GENERATION:
 1. SAFE SQL GENERATION:
-   - For diagnostic, investigation, and analytical inquiries: Generate clean SELECT or WITH ... SELECT queries.
-   - For administrative remediation, cleanup, or update requests (e.g. "remove demo from all live accounts", "reverse balance entry"): Generate the targeted UPDATE or DELETE statement, but it MUST ALWAYS include an explicit, safe WHERE clause to target only the specified records.
+   - For diagnostic, investigation, and analytical inquiries (e.g. equity drift, NBP eligibility, cash ledger reconciliation, stranded positions, dormant accounts, portfolio exposure, A/B cross-account hedging, syndicate coordinated execution): Generate clean, performant SELECT or WITH ... SELECT queries.
+   - For administrative remediation, cleanup, or update requests (e.g. "remove demo from all live accounts", "zero out negative balance debt", "cancel orphan pending orders"): Generate the targeted UPDATE or DELETE statement, but it MUST ALWAYS include an explicit, safe WHERE clause to target only the specified records.
    - NEVER output DROP, TRUNCATE, ALTER, GRANT, REVOKE, or catastrophic DDL commands!
 2. TARGET SCOPE & ACCOUNT FILTERING:
    - If the user brief specifies a single target account: filter ta.login = <loginVal> (where ta is "TradingAccount").
