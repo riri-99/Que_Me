@@ -31,7 +31,23 @@ import {
   Replace,
   Eye,
   Code2,
-  Pencil
+  Pencil,
+  Play,
+  Loader2,
+  Wifi,
+  WifiOff,
+  Table,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
+  FileSpreadsheet,
+  AlertCircle,
+  CheckCircle2,
+  Server,
+  Cloud,
+  Upload,
+  FileCode,
+  Lock
 } from 'lucide-react';
 import { 
   QUERY_TEMPLATES, 
@@ -68,7 +84,7 @@ export default function DashboardPage() {
   // Static initial defaults to avoid SSR prerender time skew
   const [startDate, setStartDate] = useState<string>('2026-10-23');
   const [endDate, setEndDate] = useState<string>('2026-10-30');
-  const [activeCaseId, setActiveCaseId] = useState<string>('remove-demo-live-accounts');
+  const [activeCaseId, setActiveCaseId] = useState<string>('');
   const [searchReason, setSearchReason] = useState<string>('');
   const [parameterized, setParameterized] = useState<boolean>(false);
 
@@ -82,15 +98,95 @@ export default function DashboardPage() {
   const [savedCustomScripts, setSavedCustomScripts] = useState<UserCustomScript[]>([]);
 
   // SQL Editor States
-  const [editorSql, setEditorSql] = useState<string>('');
+  const [editorSql, setEditorSql] = useState<string>('-- Write the query here\n');
   const [isCustomEdited, setIsCustomEdited] = useState<boolean>(false);
   const [viewMode, setViewMode] = useState<'editor' | 'preview'>('editor');
 
-  // Find & Replace States
+  // Left Panel Explorer States
+  const [tableSearchQuery, setTableSearchQuery] = useState<string>('');
+  const [selectedTable, setSelectedTable] = useState<string | null>(null);
+
+  // Dump SQL File States (Populate Neon DB directly from .sql file - Zero-Memory OOM Safe)
+  const dumpFileInputRef = useRef<HTMLInputElement>(null);
+  const [isDumpModalOpen, setIsDumpModalOpen] = useState<boolean>(false);
+  const [selectedDumpFile, setSelectedDumpFile] = useState<File | null>(null);
+  const [localDumpPathInput, setLocalDumpPathInput] = useState<string>('');
+  const [dumpFileMeta, setDumpFileMeta] = useState<{
+    name: string;
+    size: string;
+    sizeBytes: number;
+    preview: string;
+    isLargeFile?: boolean;
+  } | null>(null);
+  const [isPopulatingDb, setIsPopulatingDb] = useState<boolean>(false);
+  const [dumpResultStatus, setDumpResultStatus] = useState<{
+    success?: boolean;
+    message?: string;
+    tablesCount?: number;
+    durationMs?: number;
+    output?: string;
+  } | null>(null);
+
+  // Neon DB Connection States
+  const [dbHealth, setDbHealth] = useState<{
+    connected: boolean;
+    database?: string;
+    version?: string;
+    host?: string;
+    maskedUrl?: string;
+    latencyMs?: number;
+    tables?: Array<{ name: string; count: string }>;
+    error?: string;
+  }>({ connected: false });
+  const [isCheckingHealth, setIsCheckingHealth] = useState<boolean>(true);
+  const [isConnModalOpen, setIsConnModalOpen] = useState<boolean>(false);
+  const [inputConnUrl, setInputConnUrl] = useState<string>('');
+  const [showPassword, setShowPassword] = useState<boolean>(false);
+  const [connTestStatus, setConnTestStatus] = useState<{
+    testing: boolean;
+    success?: boolean;
+    message?: string;
+    latencyMs?: number;
+  }>({ testing: false });
+  const [isSavingConn, setIsSavingConn] = useState<boolean>(false);
+
+  // Query Execution States
+  const [isExecuting, setIsExecuting] = useState<boolean>(false);
+  const [execElapsed, setExecElapsed] = useState<number>(0);
+  const [queryResult, setQueryResult] = useState<{
+    success: boolean;
+    command?: string;
+    columns?: Array<{ name: string; dataTypeID?: number }>;
+    rows?: Array<Record<string, any>>;
+    rowCount?: number;
+    executionTimeMs?: number;
+    error?: string;
+    code?: string;
+    position?: number;
+    detail?: string;
+    hint?: string;
+    executedAt?: string;
+  } | null>(null);
+
+  // Results Viewport Filtering & Sorting
+  const [resultSearchQuery, setResultSearchQuery] = useState<string>('');
+  const [sortColumn, setSortColumn] = useState<string | null>(null);
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
+  const [rowsPerPage, setRowsPerPage] = useState<number>(100);
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [copiedResultJson, setCopiedResultJson] = useState<boolean>(false);
+  const [tableBoxHeight, setTableBoxHeight] = useState<'standard' | 'tall'>('standard');
+
+  // Timer Ref
+  const execTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  /*
+  // Find & Replace States (Commented out)
   const [showFindReplace, setShowFindReplace] = useState<boolean>(false);
   const [findText, setFindText] = useState<string>('');
   const [replaceText, setReplaceText] = useState<string>('');
   const [findStatus, setFindStatus] = useState<string>('');
+  */
 
   // Script Modal States (Save as Script / Create New Script)
   const [isScriptModalOpen, setIsScriptModalOpen] = useState<boolean>(false);
@@ -136,7 +232,7 @@ export default function DashboardPage() {
     if (caseParam && caseParam !== 'slippage-analysis') {
       setActiveCaseId(caseParam);
     } else {
-      setActiveCaseId('remove-demo-live-accounts');
+      setActiveCaseId('');
     }
     if (params.get('dateMode') === 'single' || params.get('dateMode') === 'range') {
       setDateMode(params.get('dateMode') as 'single' | 'range');
@@ -181,8 +277,8 @@ export default function DashboardPage() {
   }, [savedCustomScripts, activeCaseId]);
 
   const activeTemplate = useMemo(() => {
-    if (activeUserScript) return null;
-    return QUERY_TEMPLATES.find((t) => t.id === activeCaseId) || QUERY_TEMPLATES[0];
+    if (!activeCaseId || activeUserScript) return null;
+    return QUERY_TEMPLATES.find((t) => t.id === activeCaseId) || null;
   }, [activeCaseId, activeUserScript]);
 
   const { generatedSql, currentMetadata } = useMemo(() => {
@@ -209,7 +305,7 @@ export default function DashboardPage() {
     }
 
     if (!activeTemplate) {
-      return { generatedSql: '', currentMetadata: null };
+      return { generatedSql: '-- Write the query here\n', currentMetadata: null };
     }
 
     const sql = activeTemplate.generateSql({
@@ -251,6 +347,377 @@ export default function DashboardPage() {
     }
   };
 
+  // Check Neon DB health on load
+  const fetchDbHealth = async () => {
+    setIsCheckingHealth(true);
+    try {
+      const res = await fetch('/api/db/health');
+      const data = await res.json();
+      setDbHealth(data);
+      if (data.maskedUrl && !inputConnUrl) {
+        setInputConnUrl(data.maskedUrl.includes('••••••') ? '' : data.maskedUrl);
+      }
+    } catch {
+      setDbHealth({ connected: false, tables: [], error: 'Failed to contact database health endpoint' });
+    } finally {
+      setIsCheckingHealth(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchDbHealth();
+  }, []);
+
+  const startExecTimer = () => {
+    const startTime = Date.now();
+    setExecElapsed(0);
+    if (execTimerRef.current) clearInterval(execTimerRef.current);
+    execTimerRef.current = setInterval(() => {
+      setExecElapsed(Number(((Date.now() - startTime) / 1000).toFixed(1)));
+    }, 100);
+  };
+
+  const stopExecTimer = () => {
+    if (execTimerRef.current) {
+      clearInterval(execTimerRef.current);
+      execTimerRef.current = null;
+    }
+  };
+
+  // Run SQL Query
+  const handleExecuteQuery = async () => {
+    if (isExecuting) return;
+    const userSql = (editorSql || generatedSql || '').trim();
+    if (!userSql || userSql === '-- Write the query here') return;
+
+    if (!dbHealth.connected) {
+      setIsConnModalOpen(true);
+      return;
+    }
+
+    // Wrapped in non-editable transaction block BEGIN; ... ROLLBACK;
+    const sqlToRun =
+      userSql.toUpperCase().startsWith('BEGIN;') && userSql.toUpperCase().includes('ROLLBACK;')
+        ? userSql
+        : `BEGIN;\n${userSql}\nROLLBACK;`;
+
+    setIsExecuting(true);
+    startExecTimer();
+
+    try {
+      const res = await fetch('/api/query/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sql: sqlToRun })
+      });
+      const data = await res.json();
+      setQueryResult({
+        ...data,
+        executedAt: new Date().toLocaleTimeString()
+      });
+      setCurrentPage(1);
+      setResultSearchQuery('');
+      setSortColumn(null);
+    } catch (err: any) {
+      setQueryResult({
+        success: false,
+        error: err.message || 'Network error executing query.',
+        executedAt: new Date().toLocaleTimeString()
+      });
+    } finally {
+      stopExecTimer();
+      setIsExecuting(false);
+    }
+  };
+
+  // Table selection from Explorer -> Write query in editor
+  const handleSelectTable = (tableName: string) => {
+    setSelectedTable(tableName);
+    const sql = `SELECT * FROM "${tableName}" LIMIT 50;`;
+    setEditorSql(sql);
+    setIsCustomEdited(true);
+  };
+
+  // Filtered tables list from Neon DB
+  const filteredTables = useMemo(() => {
+    if (!dbHealth.connected || !dbHealth.tables) return [];
+    if (!tableSearchQuery.trim()) return dbHealth.tables;
+    const q = tableSearchQuery.toLowerCase();
+    return dbHealth.tables.filter((t) => t.name.toLowerCase().includes(q));
+  }, [dbHealth.connected, dbHealth.tables, tableSearchQuery]);
+
+  // Handle selecting a .sql dump file to populate Neon DB (Zero-Memory OOM Safe)
+  const handleDumpFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const formatSize = (bytes: number) => {
+      if (bytes >= 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+      if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+      if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return bytes + ' B';
+    };
+
+    try {
+      // CRITICAL: NEVER call reader.readAsText(file) on large dumps!
+      // Read ONLY first 4KB as preview to preserve browser memory and prevent renderer OOM crash
+      const previewSlice = file.slice(0, 4096);
+      const previewText = await previewSlice.text();
+      const previewLines = previewText.split('\n').slice(0, 15).join('\n');
+
+      setSelectedDumpFile(file);
+      setLocalDumpPathInput('');
+      setDumpFileMeta({
+        name: file.name,
+        size: formatSize(file.size),
+        sizeBytes: file.size,
+        preview: previewLines,
+        isLargeFile: file.size > 10 * 1024 * 1024
+      });
+      setDumpResultStatus(null);
+      setIsDumpModalOpen(true);
+    } catch (err: any) {
+      console.error('Failed to read dump file preview:', err);
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  // Populate Neon DB with the chosen .sql dump file
+  const handlePopulateDatabaseWithDump = async () => {
+    if ((!selectedDumpFile && !localDumpPathInput.trim()) || isPopulatingDb) return;
+
+    if (!dbHealth.connected) {
+      setIsConnModalOpen(true);
+      return;
+    }
+
+    setIsPopulatingDb(true);
+    setDumpResultStatus(null);
+
+    try {
+      const formData = new FormData();
+      if (selectedDumpFile) {
+        formData.append('dumpFile', selectedDumpFile);
+      }
+      if (localDumpPathInput.trim()) {
+        formData.append('localFilePath', localDumpPathInput.trim());
+      }
+
+      const res = await fetch('/api/query/execute', {
+        method: 'POST',
+        body: formData
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        setDumpResultStatus({
+          success: true,
+          message: data.message || 'Database successfully populated with tables and rows!',
+          tablesCount: data.tables?.length || 0,
+          durationMs: data.durationMs || data.executionTimeMs,
+          output: data.output
+        });
+        if (data.tables) {
+          setDbHealth((prev) => ({ ...prev, tables: data.tables }));
+        }
+        await fetchDbHealth();
+        setScriptSaveToast(`Database populated! ${data.tables?.length || ''} tables loaded.`);
+        setTimeout(() => setScriptSaveToast(''), 4000);
+      } else {
+        setDumpResultStatus({
+          success: false,
+          message: data.error || 'Failed to populate database with SQL dump.'
+        });
+      }
+    } catch (err: any) {
+      setDumpResultStatus({
+        success: false,
+        message: err.message || 'Network error while executing dump against Neon DB.'
+      });
+    } finally {
+      setIsPopulatingDb(false);
+    }
+  };
+
+  // Global Ctrl+Enter shortcut listener
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        handleExecuteQuery();
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [editorSql, generatedSql, dbHealth.connected, isExecuting]);
+
+  // Connection Management Handlers
+  const handleTestConnection = async () => {
+    if (!inputConnUrl.trim()) return;
+    setConnTestStatus({ testing: true });
+    try {
+      const res = await fetch(`/api/db/health?testConn=${encodeURIComponent(inputConnUrl.trim())}`);
+      const data = await res.json();
+      if (data.connected) {
+        setConnTestStatus({
+          testing: false,
+          success: true,
+          message: `Connected to "${data.database}" (${data.version}) in ${data.latencyMs}ms`,
+          latencyMs: data.latencyMs
+        });
+      } else {
+        setConnTestStatus({
+          testing: false,
+          success: false,
+          message: data.error || 'Connection failed. Please check credentials.'
+        });
+      }
+    } catch (err: any) {
+      setConnTestStatus({
+        testing: false,
+        success: false,
+        message: err.message || 'Connection test request failed.'
+      });
+    }
+  };
+
+  const handleSaveConnection = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!inputConnUrl.trim()) return;
+    setIsSavingConn(true);
+    try {
+      const res = await fetch('/api/db/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ connectionString: inputConnUrl.trim() })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setDbHealth({
+          connected: true,
+          database: data.database,
+          version: data.version,
+          host: data.host,
+          maskedUrl: data.maskedUrl,
+          latencyMs: data.latencyMs,
+          tables: data.tables || []
+        });
+        setIsConnModalOpen(false);
+        setScriptSaveToast('Neon database connected successfully!');
+        setTimeout(() => setScriptSaveToast(''), 3000);
+      } else {
+        setConnTestStatus({
+          testing: false,
+          success: false,
+          message: data.error || 'Could not save connection.'
+        });
+      }
+    } catch (err: any) {
+      setConnTestStatus({
+        testing: false,
+        success: false,
+        message: err.message || 'Failed to save connection.'
+      });
+    } finally {
+      setIsSavingConn(false);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    try {
+      await fetch('/api/db/config', { method: 'DELETE' });
+      setDbHealth({ connected: false, tables: [] });
+      setSelectedTable(null);
+      setInputConnUrl('');
+      setConnTestStatus({ testing: false });
+      setIsConnModalOpen(false);
+      setScriptSaveToast('Disconnected from Neon database.');
+      setTimeout(() => setScriptSaveToast(''), 3000);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  // CSV Export & Copy Handlers
+  const handleDownloadCsv = () => {
+    if (!queryResult || !queryResult.rows || queryResult.rows.length === 0) return;
+    const cols = queryResult.columns?.map((c) => c.name) || Object.keys(queryResult.rows[0]);
+    const escapeCsv = (val: any) => {
+      if (val === null || val === undefined) return '';
+      const str = typeof val === 'object' ? JSON.stringify(val) : String(val);
+      if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+        return `"${str.replace(/"/g, '""')}"`;
+      }
+      return str;
+    };
+
+    const headerRow = cols.join(',');
+    const bodyRows = queryResult.rows.map((row) => cols.map((c) => escapeCsv(row[c])).join(','));
+    const csvContent = [headerRow, ...bodyRows].join('\n');
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `query_result_${activeCaseId}_${Date.now()}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleCopyResultJson = async () => {
+    if (!queryResult || !queryResult.rows) return;
+    await navigator.clipboard.writeText(JSON.stringify(queryResult.rows, null, 2));
+    setCopiedResultJson(true);
+    setTimeout(() => setCopiedResultJson(false), 2000);
+  };
+
+  // Results filtering and sorting
+  const filteredAndSortedRows = useMemo(() => {
+    if (!queryResult || !queryResult.rows) return [];
+    let list = [...queryResult.rows];
+
+    // Search filter across all columns
+    if (resultSearchQuery.trim()) {
+      const q = resultSearchQuery.toLowerCase();
+      list = list.filter((row) => {
+        return Object.values(row).some((v) => {
+          if (v === null || v === undefined) return false;
+          return String(v).toLowerCase().includes(q);
+        });
+      });
+    }
+
+    // Column sort
+    if (sortColumn) {
+      list.sort((a, b) => {
+        const valA = a[sortColumn];
+        const valB = b[sortColumn];
+        if (valA === valB) return 0;
+        if (valA === null || valA === undefined) return 1;
+        if (valB === null || valB === undefined) return -1;
+        if (typeof valA === 'number' && typeof valB === 'number') {
+          return sortDirection === 'asc' ? valA - valB : valB - valA;
+        }
+        const strA = String(valA);
+        const strB = String(valB);
+        return sortDirection === 'asc' ? strA.localeCompare(strB) : strB.localeCompare(strA);
+      });
+    }
+
+    return list;
+  }, [queryResult, resultSearchQuery, sortColumn, sortDirection]);
+
+  const paginatedRows = useMemo(() => {
+    if (rowsPerPage === 0) return filteredAndSortedRows;
+    const start = (currentPage - 1) * rowsPerPage;
+    return filteredAndSortedRows.slice(start, start + rowsPerPage);
+  }, [filteredAndSortedRows, currentPage, rowsPerPage]);
+
+  const totalPages = rowsPerPage === 0 ? 1 : Math.ceil(filteredAndSortedRows.length / rowsPerPage);
+
   // Keyboard shortcut & Tab indentation in editor
   const handleEditorKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Tab') {
@@ -265,9 +732,14 @@ export default function DashboardPage() {
       requestAnimationFrame(() => {
         textarea.selectionStart = textarea.selectionEnd = start + 2;
       });
+    } else if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      handleExecuteQuery();
+    /*
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
       e.preventDefault();
       setShowFindReplace((prev) => !prev);
+    */
     } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
       e.preventDefault();
       handleOpenSaveAsScript();
@@ -279,6 +751,7 @@ export default function DashboardPage() {
     setIsCustomEdited(false);
   };
 
+  /*
   // Find & Replace Handlers
   const handleReplaceAll = () => {
     if (!findText) return;
@@ -311,6 +784,7 @@ export default function DashboardPage() {
     setFindStatus('1 occurrence replaced');
     setTimeout(() => setFindStatus(''), 3000);
   };
+  */
 
   // Script Management Handlers
   const handleOpenSaveAsScript = () => {
@@ -512,18 +986,23 @@ LIMIT 50;`;
   // Clipboard & Download Actions
   // -------------------------------------------------------------
   const handleCopySql = async () => {
-    const textToCopy = editorSql || generatedSql;
-    if (!textToCopy) return;
-    await navigator.clipboard.writeText(textToCopy);
+    const userSql = (editorSql || generatedSql || '').trim();
+    const fullSql = userSql.toUpperCase().startsWith('BEGIN;') && userSql.toUpperCase().includes('ROLLBACK;')
+      ? userSql
+      : `BEGIN;\n  ${userSql.split('\n').join('\n  ')}\nROLLBACK;\n`;
+    await navigator.clipboard.writeText(fullSql);
     setCopiedSql(true);
     setTimeout(() => setCopiedSql(false), 2000);
   };
 
   const handleDownloadSql = () => {
-    const textToDownload = editorSql || generatedSql;
-    if (!textToDownload) return;
-    const filename = `Que_Me_${activeCaseId}_login_${loginId || '100234'}_${startDate}.sql`;
-    const blob = new Blob([textToDownload], { type: 'text/sql;charset=utf-8;' });
+    const userSql = (editorSql || generatedSql || '').trim();
+    const fullSql = userSql.toUpperCase().startsWith('BEGIN;') && userSql.toUpperCase().includes('ROLLBACK;')
+      ? userSql
+      : `BEGIN;\n  ${userSql.split('\n').join('\n  ')}\nROLLBACK;\n`;
+    const caseName = activeCaseId || 'custom_query';
+    const filename = `Que_Me_${caseName}_${Date.now()}.sql`;
+    const blob = new Blob([fullSql], { type: 'text/sql;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -546,12 +1025,20 @@ LIMIT 50;`;
     setDateMode('range');
     setStartDate(last7DaysStr);
     setEndDate(todayStr);
-    setActiveCaseId('remove-demo-live-accounts');
+    setActiveCaseId('');
+    setEditorSql('-- Write the query here\n');
     setSearchReason('');
     setParameterized(false);
     setIsDropdownOpen(false);
     setIsCustomEdited(false);
-    setShowFindReplace(false);
+    setSelectedTable(null);
+    setTableSearchQuery('');
+    setDumpFileMeta(null);
+    setSelectedDumpFile(null);
+    setLocalDumpPathInput('');
+    setDumpResultStatus(null);
+    setTableBoxHeight('standard');
+    // setShowFindReplace(false);
     setViewMode('editor');
 
     setIsResetting(true);
@@ -580,113 +1067,82 @@ LIMIT 50;`;
   return (
     <div className="flex flex-col min-h-screen">
       {/* -------------------------------------------------------------
-          TOP BAR: INTEGRATED STUDIO CONTROLS (EXPANDED VERTICAL HEIGHT)
+          TOP BAR: INTEGRATED STUDIO CONTROLS
       ------------------------------------------------------------- */}
       <header 
-        style={{ minHeight: '100px', paddingTop: '2px', paddingBottom: '2px' }}
-        className="border-b border-slate-800 bg-slate-900/95 backdrop-blur sticky top-0 z-40 w-full px-6 sm:px-10 flex flex-col justify-center shadow-lg"
+        style={{ minHeight: '76px', paddingTop: '4px', paddingBottom: '4px' }}
+        className="border-b border-slate-800 bg-slate-900/95 backdrop-blur sticky top-0 z-40 w-full px-3.5 sm:px-6 xl:px-8 py-2.5 flex flex-col justify-center shadow-lg"
       >
-        <div className="w-full flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4">
+        <div className="w-full flex flex-col md:flex-row md:items-center justify-between gap-3 sm:gap-4">
           
           {/* Brand Logo & Studio Identity */}
-          <div className="flex items-center gap-2.5 shrink-0">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-indigo-600 to-cyan-500 flex items-center justify-center shadow-lg shadow-indigo-500/20 text-white font-bold text-base">
-              Q
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-heading font-bold text-xl tracking-wide bg-gradient-to-r from-white via-slate-100 to-slate-300 bg-clip-text text-transparent">
-                  Que_Me
-                </span>
-                <span className="text-[10px] font-semibold uppercase px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 font-mono">
-                  Studio
-                </span>
+          <div className="flex items-center justify-between sm:justify-start gap-3 shrink-0">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-gradient-to-tr from-indigo-600 to-cyan-500 flex items-center justify-center shadow-lg shadow-indigo-500/20 text-white font-bold text-sm sm:text-base">
+                Q
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="font-heading font-bold text-lg sm:text-xl tracking-wide bg-gradient-to-r from-white via-slate-100 to-slate-300 bg-clip-text text-transparent">
+                    Que_Me
+                  </span>
+                  <span className="text-[10px] font-semibold uppercase px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 font-mono">
+                    Studio
+                  </span>
+                </div>
               </div>
             </div>
-          </div>
 
-          {/* Centered Controls Bar: Login ID, Date Spec, Use Case */}
-          <div className="flex flex-wrap items-center justify-center gap-3 sm:gap-4 flex-1">
-            
-            {/* 1. Login ID Input */}
-            <div className="flex items-center gap-2.5 bg-slate-950 border border-slate-700/80 rounded-xl px-4 py-2 focus-within:border-indigo-500 transition-colors shadow-sm">
-              <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Login:</label>
-              <input
-                type="number"
-                value={loginId}
-                onChange={(e) => setLoginId(e.target.value)}
-                placeholder="100234"
-                className="w-28 bg-transparent text-sm text-white placeholder-slate-600 focus:outline-none font-mono"
-              />
-              {loginId && (
-                <button
-                  type="button"
-                  onClick={() => setLoginId('')}
-                  className="text-slate-500 hover:text-slate-300 transition-colors"
-                  title="Clear login"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-
-            {/* 2. Date Spec with Single / Range Toggle */}
-            <div className="flex items-center gap-2.5 bg-slate-950 border border-slate-700/80 rounded-xl px-3.5 py-1.5 shadow-sm">
-              <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider hidden sm:inline-block">Date:</span>
-              <div className="inline-flex rounded-lg p-0.5 bg-slate-900 text-xs">
-                <button
-                  type="button"
-                  onClick={() => setDateMode('single')}
-                  className={`px-2.5 py-1 rounded-md font-medium transition-colors ${
-                    dateMode === 'single'
-                      ? 'bg-indigo-600 text-white shadow-sm'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                  title="Single Date"
-                >
-                  Single
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setDateMode('range')}
-                  className={`px-2.5 py-1 rounded-md font-medium transition-colors ${
-                    dateMode === 'range'
-                      ? 'bg-indigo-600 text-white shadow-sm'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                  title="Date Range"
-                >
-                  Range
-                </button>
+            {/* Neon DB Connection Pill */}
+            <button
+              type="button"
+              onClick={() => setIsConnModalOpen(true)}
+              className={`flex items-center gap-2 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-mono border transition-all shadow-sm group ${
+                isCheckingHealth
+                  ? 'bg-slate-950/70 border-slate-700 text-slate-400'
+                  : dbHealth.connected
+                  ? 'bg-emerald-950/40 border-emerald-500/30 text-emerald-400 hover:border-emerald-400 hover:bg-emerald-950/60'
+                  : 'bg-rose-950/30 border-rose-500/30 text-rose-300 hover:border-rose-400 hover:bg-rose-950/50'
+              }`}
+              title="Click to manage Neon database connection"
+            >
+              <div className="flex items-center gap-1.5">
+                <span className={`w-2 h-2 rounded-full ${
+                  isCheckingHealth
+                    ? 'bg-slate-500 animate-ping'
+                    : dbHealth.connected
+                    ? 'bg-emerald-400 animate-pulse'
+                    : 'bg-rose-400'
+                }`} />
+                <Database className="w-3.5 h-3.5 opacity-80" />
               </div>
-
-              <div className="flex items-center gap-2 px-1">
-                <input
-                  type="date"
-                  value={startDate}
-                  onChange={(e) => setStartDate(e.target.value)}
-                  className="bg-transparent text-xs sm:text-sm text-white focus:outline-none font-mono [color-scheme:dark]"
-                />
-                {dateMode === 'range' && (
-                  <>
-                    <span className="text-slate-400 text-xs font-mono uppercase">to</span>
-                    <input
-                      type="date"
-                      value={endDate}
-                      onChange={(e) => setEndDate(e.target.value)}
-                      className="bg-transparent text-xs sm:text-sm text-white focus:outline-none font-mono [color-scheme:dark]"
-                    />
-                  </>
+              <div className="flex items-center gap-1.5 text-left">
+                <span className="font-semibold text-[11px] sm:text-xs">
+                  {isCheckingHealth ? 'Checking...' : dbHealth.connected ? (dbHealth.database || 'Neon DB') : 'No DB'}
+                </span>
+                {dbHealth.connected && dbHealth.latencyMs !== undefined && (
+                  <span className="text-[10px] text-emerald-500/80 hidden md:inline">
+                    • {dbHealth.latencyMs}ms
+                  </span>
+                )}
+                {!dbHealth.connected && (
+                  <span className="text-[10px] text-rose-400/80 hidden sm:inline underline decoration-dotted">
+                    (Connect)
+                  </span>
                 )}
               </div>
-            </div>
+            </button>
+          </div>
+
+          {/* Right Controls Bar: Use Case Dropdown Combobox + Actions */}
+          <div className="flex items-center gap-2.5 sm:gap-3 flex-1 max-w-full md:max-w-2xl lg:max-w-3xl ml-0 md:ml-4">
 
             {/* 3. Reason / Use Case Dropdown */}
-            <div className="relative min-w-[340px] md:min-w-[440px] lg:min-w-[500px] max-w-[620px] flex-1" ref={dropdownRef}>
+            <div className="relative w-full sm:w-auto min-w-0 sm:min-w-[340px] md:min-w-[440px] lg:min-w-[500px] max-w-full sm:max-w-[620px] flex-1" ref={dropdownRef}>
               <button
                 type="button"
                 onClick={() => setIsDropdownOpen(!isDropdownOpen)}
-                className="w-full bg-slate-950 border border-slate-700/80 hover:border-slate-600 rounded-xl px-4 py-2.5 text-sm text-left flex items-center justify-between text-white focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-colors shadow-sm group"
+                className="w-full bg-slate-950 border border-slate-700/80 hover:border-slate-600 rounded-xl px-3.5 sm:px-4 py-2.5 text-sm text-left flex items-center justify-between text-white focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-colors shadow-sm group"
               >
                 <div className="flex items-center gap-2.5 truncate">
                   <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider shrink-0">Use Case:</span>
@@ -706,7 +1162,7 @@ LIMIT 50;`;
                       {renderStatementBadge(activeTemplate.statementType || getTemplateStatementType(activeTemplate))}
                     </div>
                   ) : (
-                    <span className="text-slate-400">Select investigation reason...</span>
+                    <span className="text-slate-400">Select a use case...</span>
                   )}
                 </div>
                 <Search className="w-4 h-4 text-slate-400 group-hover:text-slate-200 shrink-0 ml-2" />
@@ -855,165 +1311,267 @@ LIMIT 50;`;
               )}
             </div>
 
-            {/* 3b. Quick "+ New Script" button */}
-            <button
-              type="button"
-              onClick={handleOpenCreateNewScript}
-              className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700/80 hover:border-emerald-500 text-emerald-400 hover:text-emerald-300 text-xs font-semibold hover:bg-slate-800 transition-all shadow-sm active:scale-95 shrink-0"
-              title="Write a new custom SQL script from scratch"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">New Script</span>
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              {/* 3b. Quick "+ New Script" button */}
+              <button
+                type="button"
+                onClick={handleOpenCreateNewScript}
+                className="flex items-center gap-1.5 px-3 sm:px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700/80 hover:border-emerald-500 text-emerald-400 hover:text-emerald-300 text-xs font-semibold hover:bg-slate-800 transition-all shadow-sm active:scale-95 shrink-0"
+                title="Write a new custom SQL script from scratch"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span className="inline">New Script</span>
+              </button>
 
-            {/* 4. Reset to Default Button */}
-            <button
-              type="button"
-              onClick={handleResetAll}
-              className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700/80 hover:border-slate-500 hover:bg-slate-800 text-slate-400 hover:text-white text-xs font-semibold transition-all shadow-sm active:scale-95 shrink-0 group"
-              title="Reset all filters, dates, and query selections back to default"
-            >
-              {isResetting ? (
-                <Check className="w-3.5 h-3.5 text-emerald-400" />
-              ) : (
-                <RotateCcw className="w-3.5 h-3.5 text-slate-400 group-hover:-rotate-90 transition-transform duration-200" />
-              )}
-              <span className={isResetting ? 'text-emerald-400 font-semibold' : ''}>
-                {isResetting ? 'Reset Done' : 'Reset'}
-              </span>
-            </button>
+              {/* 4. Reset to Default Button */}
+              <button
+                type="button"
+                onClick={handleResetAll}
+                className="flex items-center gap-2 px-3 sm:px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700/80 hover:border-slate-500 hover:bg-slate-800 text-slate-400 hover:text-white text-xs font-semibold transition-all shadow-sm active:scale-95 shrink-0 group"
+                title="Reset all filters, dates, and query selections back to default"
+              >
+                {isResetting ? (
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                ) : (
+                  <RotateCcw className="w-3.5 h-3.5 text-slate-400 group-hover:-rotate-90 transition-transform duration-200" />
+                )}
+                <span className={isResetting ? 'text-emerald-400 font-semibold' : ''}>
+                  {isResetting ? 'Reset Done' : 'Reset'}
+                </span>
+              </button>
+            </div>
 
           </div>
         </div>
       </header>
 
       {/* -------------------------------------------------------------
-          RESULTS VIEWPORT: TWO MATCHING EXPANSIVE PANELS (SKETCH SPEC)
+          MAIN APPLICATION VIEWPORT
       ------------------------------------------------------------- */}
-      <main className="flex-1 w-full max-w-[1850px] mx-auto px-4 sm:px-6 py-4 flex flex-col">
+      <main className="flex-1 w-full max-w-[1920px] mx-auto px-3.5 sm:px-6 py-3.5 sm:py-4 flex flex-col">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 flex-1 items-stretch">
           
           {/* =========================================================
-              LEFT PANEL: USE CASE DESCRIPTION & PLAIN-ENGLISH AUDIT GUIDE
+              LEFT PANEL: TABLES EXPLORER & DUMP CONTEXT / USE CASE GUIDE
           ========================================================= */}
-          <div className="lg:col-span-5 flex flex-col">
-            <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg flex-1 flex flex-col">
+          <div className="lg:col-span-4 xl:col-span-4 flex flex-col">
+            <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg flex flex-col h-[580px] sm:h-[640px] lg:h-[calc(100vh-130px)] lg:max-h-[820px]">
               
-              {/* Header: "Use Case Overview" */}
-              <div className="border-b border-slate-800 bg-slate-950/80 px-4 py-3 flex items-center justify-between shrink-0">
-                <div className="flex items-center gap-2.5">
-                  {getCategoryIcon(currentMetadata?.category || '')}
-                  <span className="text-xs font-bold uppercase tracking-wider text-slate-200 font-mono">
-                    Use Case Overview
-                  </span>
-                </div>
+              {/* Header / Toolbar Panel: ONLY Dump SQL File */}
+              <div className="border-b border-slate-800 bg-slate-950/80 px-3.5 sm:px-4 py-2.5 flex items-center justify-between gap-2 shrink-0">
                 <div className="flex items-center gap-2">
-                  {currentMetadata?.statementType && renderStatementBadge(currentMetadata.statementType)}
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 uppercase font-semibold">
-                    {currentMetadata?.category}
+                  <div className="p-1.5 rounded-lg bg-indigo-600/20 text-indigo-400">
+                    <Table className="w-4 h-4" />
+                  </div>
+                  <span className="font-mono text-xs font-bold text-slate-200 uppercase tracking-wider">
+                    Database Tables
                   </span>
-                  {currentMetadata?.sensitivity && (
-                    <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
-                      currentMetadata.sensitivity.includes('High') 
-                        ? 'bg-rose-500/10 text-rose-300 border-rose-500/20' 
-                        : 'bg-slate-800 text-slate-300 border-slate-700'
-                    }`}>
-                      {currentMetadata.sensitivity}
+                  {dbHealth.connected && dbHealth.tables && dbHealth.tables.length > 0 && (
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 font-semibold">
+                      {dbHealth.tables.length}
                     </span>
                   )}
                 </div>
+
+                {/* Only this one thing for the toolbar: Dump SQL File */}
+                <div className="flex items-center gap-2">
+                  <input
+                    type="file"
+                    ref={dumpFileInputRef}
+                    onChange={handleDumpFileSelected}
+                    accept=".sql,.dump,.txt"
+                    className="hidden"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!dbHealth.connected) {
+                        setIsConnModalOpen(true);
+                      } else {
+                        dumpFileInputRef.current?.click();
+                      }
+                    }}
+                    disabled={isPopulatingDb}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-cyan-600 hover:from-indigo-500 hover:to-cyan-500 text-white text-xs font-semibold shadow-md shadow-indigo-950/40 transition-all active:scale-95 disabled:opacity-50"
+                    title="Upload and execute a .sql dump file to populate Neon DB"
+                  >
+                    {isPopulatingDb ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-white" />
+                    ) : (
+                      <Upload className="w-3.5 h-3.5 text-white" />
+                    )}
+                    <span>{isPopulatingDb ? 'Populating...' : 'Dump SQL File'}</span>
+                  </button>
+                </div>
               </div>
 
-              {/* Main Content Area: Spacious, Scrollable, Minimal Jargon */}
-              <div className="flex-1 p-5 sm:p-6 overflow-y-auto flex flex-col gap-5 text-slate-200">
-                
-                {/* 1. Case Title & Plain-Language Description */}
-                <div>
-                  <h2 className="text-xl sm:text-2xl font-bold text-white tracking-tight leading-snug mb-3 font-heading">
-                    {currentMetadata?.title}
-                  </h2>
-                  <div className="bg-slate-950/60 border border-slate-800/80 rounded-xl p-4 shadow-inner">
-                    <div className="text-[11px] font-semibold text-cyan-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5 font-mono">
-                      <Info className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-                      <span>What this query does</span>
-                    </div>
-                    <p className="text-sm text-slate-200 leading-relaxed font-sans">
-                      {currentMetadata?.description}
-                    </p>
-                  </div>
-                </div>
+              {/* Panel Content: Tables Explorer */}
+              <div className="flex-1 min-h-0 flex flex-col p-3 sm:p-4 overflow-hidden">
+                  {dbHealth.connected && dbHealth.tables && dbHealth.tables.length > 0 ? (
+                    <div className="flex-1 min-h-0 flex flex-col">
+                      {/* Search Tables Filter Bar */}
+                      <div className="relative mb-2.5 shrink-0">
+                        <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-slate-500" />
+                        <input
+                          type="text"
+                          value={tableSearchQuery}
+                          onChange={(e) => setTableSearchQuery(e.target.value)}
+                          placeholder="Search database tables..."
+                          className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-8 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 font-mono"
+                        />
+                        {tableSearchQuery && (
+                          <button
+                            type="button"
+                            onClick={() => setTableSearchQuery('')}
+                            className="absolute right-2.5 top-2.5 text-slate-500 hover:text-slate-300"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
 
-                {/* 2. Key Checkpoints / What to look for */}
-                {currentMetadata?.diagnosticNotes && currentMetadata.diagnosticNotes.length > 0 && (
-                  <div>
-                    <div className="text-[11px] font-semibold text-indigo-300 uppercase tracking-wider mb-2 flex items-center gap-1.5 font-mono">
-                      <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                      <span>What to look for in the results</span>
-                    </div>
-                    <ul className="space-y-2 bg-slate-950/40 border border-slate-800/60 rounded-xl p-3.5 text-xs text-slate-300 font-sans">
-                      {currentMetadata.diagnosticNotes.map((note, idx) => (
-                        <li key={idx} className="flex items-start gap-2.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 mt-1.5 shrink-0" />
-                          <span className="leading-relaxed">{note}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
+                      {/* Sticky Sub-Header: Tables count & Est. Rows */}
+                      <div className="px-2 py-1 text-[11px] font-mono uppercase tracking-wider text-slate-500 flex items-center justify-between shrink-0 mb-1 border-b border-slate-800/60 pb-1.5">
+                        <span>Tables ({filteredTables.length})</span>
+                        <span>Est. Rows</span>
+                      </div>
 
-                {/* 3. Target Database Tables */}
-                <div>
-                  <div className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-1.5 font-mono">
-                    <Database className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                    <span>Database Tables Checked</span>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {currentMetadata?.tables.map((table) => (
-                      <span
-                        key={table}
-                        className="text-xs font-mono px-3 py-1.5 rounded-lg bg-slate-950 text-indigo-300 border border-indigo-900/40 flex items-center gap-1.5 shadow-sm"
+                      {/* Tables List: Dedicated scrollable viewport with its own scrollbar */}
+                      <div className="flex-1 min-h-0 overflow-y-auto space-y-1.5 pr-1.5 custom-scrollbar">
+                        {filteredTables.length === 0 ? (
+                          <div className="p-6 text-center text-xs text-slate-500">
+                            No tables matching "{tableSearchQuery}".
+                          </div>
+                        ) : (
+                          filteredTables.map((tbl) => {
+                            const isSelected = selectedTable === tbl.name;
+                            return (
+                              <div
+                                key={tbl.name}
+                                onClick={() => handleSelectTable(tbl.name)}
+                                className={`w-full px-3 py-2.5 rounded-xl border transition-all cursor-pointer flex items-center justify-between group ${
+                                  isSelected
+                                    ? 'bg-indigo-950/70 border-indigo-500/50 shadow-sm'
+                                    : 'bg-slate-950/60 hover:bg-slate-800/80 border-slate-800/80 hover:border-slate-700'
+                                }`}
+                              >
+                                <div className="flex items-center gap-2.5 min-w-0 mr-2">
+                                  <div className={`p-1.5 rounded-lg shrink-0 ${
+                                    isSelected
+                                      ? 'bg-indigo-600/30 text-indigo-300'
+                                      : 'bg-slate-900 text-slate-400 group-hover:text-indigo-400'
+                                  }`}>
+                                    <Table className="w-3.5 h-3.5" />
+                                  </div>
+                                  <span className={`font-mono text-xs truncate ${
+                                    isSelected ? 'text-white font-bold' : 'text-slate-200 group-hover:text-white'
+                                  }`}>
+                                    {tbl.name}
+                                  </span>
+                                </div>
+                                <div className="shrink-0 flex items-center gap-1.5">
+                                  <span className="font-mono text-[11px] px-2 py-0.5 rounded-md bg-slate-900 border border-slate-800 text-slate-400 font-semibold group-hover:text-emerald-400 group-hover:border-emerald-500/30">
+                                    {tbl.count}
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
+                  ) : !dbHealth.connected ? (
+                    /* NOT CONNECTED STATE: Per user prompt, tables are NOT loaded when disconnected */
+                    <div className="flex-1 flex flex-col items-center justify-center p-6 text-center my-auto">
+                      <div className="w-14 h-14 rounded-2xl bg-rose-500/10 border border-rose-500/25 flex items-center justify-center text-rose-400 mb-3.5">
+                        <WifiOff className="w-7 h-7" />
+                      </div>
+                      <h4 className="text-sm sm:text-base font-bold text-white font-heading mb-1.5">
+                        No Tables Loaded
+                      </h4>
+                      <p className="text-xs text-slate-400 leading-relaxed max-w-xs mb-4">
+                        Database tables are fetched dynamically from Neon DB. Connect your restored production database to explore tables.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setIsConnModalOpen(true)}
+                        className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold text-xs shadow-md transition-all active:scale-95"
                       >
-                        <span className="w-1.5 h-1.5 rounded-full bg-indigo-400"></span>
-                        {table}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-
-                {/* 4. Custom User Script Indicator Badge if active */}
-                {activeUserScript && (
-                  <div className="mt-auto pt-4 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-400 font-mono">
-                    <div className="flex items-center gap-1.5 text-emerald-400">
-                      <BookmarkPlus className="w-3.5 h-3.5" />
-                      <span>Custom Saved Script</span>
+                        <Database className="w-4 h-4" />
+                        <span>Connect Neon Database</span>
+                      </button>
                     </div>
-                    <span className="text-[11px] text-slate-500">
-                      Updated: {new Date(activeUserScript.updatedAt).toLocaleDateString()}
-                    </span>
-                  </div>
-                )}
-
-              </div>
+                  ) : (
+                    /* CONNECTED BUT 0 TABLES */
+                    <div className="flex-1 flex flex-col items-center justify-center p-6 text-center my-auto">
+                      <div className="w-12 h-12 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 mb-3">
+                        <Upload className="w-6 h-6" />
+                      </div>
+                      <h4 className="text-xs sm:text-sm font-semibold text-slate-200 mb-1">
+                        Ready for SQL Dump
+                      </h4>
+                      <p className="text-xs text-slate-400 max-w-xs mb-3">
+                        Connected to <span className="text-emerald-400 font-mono">{dbHealth.database}</span>. Click "Dump SQL File" above to populate this database with your tables and rows.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => dumpFileInputRef.current?.click()}
+                        className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md transition-all active:scale-95"
+                      >
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>Select .sql Dump File</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
 
             </div>
           </div>
 
           {/* =========================================================
-              RIGHT PANEL: > SQL QUERY (EDITABLE CODE EDITOR + ACTIONS)
+              RIGHT PANEL: TWO-TIER STACKED LAYOUT
+              TOP CARD: SELECTED TABLES WRITE A QUERY (SQL EDITOR)
+              BOTTOM CARD: DEDICATED RESULT BOX (LIVE RESULTS)
           ========================================================= */}
-          <div className="lg:col-span-7 flex flex-col">
-            <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg flex-1 flex flex-col">
+          <div className="lg:col-span-8 xl:col-span-8 flex flex-col gap-4">
+            
+            {/* -------------------------------------------------------
+                TOP CARD: "Selected tables write a query" (SQL Editor)
+            ------------------------------------------------------- */}
+            <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg flex flex-col">
               
-              {/* Header: "SQL query" with Actions */}
-              <div className="border-b border-slate-800 bg-slate-950/80 px-4 py-3 flex flex-wrap items-center justify-between gap-3">
-                <div className="flex flex-wrap items-center gap-2.5 sm:gap-3">
+              {/* Header: Query Editor Actions & Statement Badge */}
+              <div className="border-b border-slate-800 bg-slate-950/80 px-3.5 sm:px-4 py-2.5 flex flex-wrap items-center justify-between gap-2.5">
+                <div className="flex flex-wrap items-center gap-2 sm:gap-2.5">
                   <div className="flex items-center gap-1.5 text-xs font-bold text-slate-200 font-mono tracking-tight mr-1">
                     <Terminal className="w-4 h-4 text-indigo-400" />
-                    <span>SQL query</span>
+                    <span className="uppercase">Query Editor</span>
                   </div>
+                  {selectedTable && (
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-300 border border-cyan-500/25">
+                      table: {selectedTable}
+                    </span>
+                  )}
                   {renderStatementBadge(isCustomEdited ? getQueryStatementType(editorSql) : currentMetadata?.statementType)}
 
-                  {/* View Mode Toggle: Interactive Editor vs Syntax Preview */}
+                  {/* Primary RUN QUERY Button */}
+                  <button
+                    type="button"
+                    onClick={handleExecuteQuery}
+                    disabled={isExecuting}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white transition-all shadow-md shadow-emerald-950/40 active:scale-95 shrink-0"
+                    title="Execute query against Neon DB (Ctrl + Enter)"
+                  >
+                    {isExecuting ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-white" />
+                    ) : (
+                      <Play className="w-3.5 h-3.5 fill-current text-white" />
+                    )}
+                    <span>{isExecuting ? `Running (${execElapsed}s)...` : 'Run Query'}</span>
+                    <span className="hidden xl:inline text-[10px] opacity-75 font-mono ml-0.5"></span>
+                  </button>
+
+                  {/* Mode: Interactive Editor vs Syntax Preview */}
                   <div className="inline-flex rounded-lg p-0.5 bg-slate-900 border border-slate-800 text-xs shadow-inner">
                     <button
                       type="button"
@@ -1023,7 +1581,7 @@ LIMIT 50;`;
                           ? 'bg-indigo-600 text-white shadow-sm'
                           : 'text-slate-400 hover:text-slate-200'
                       }`}
-                      title="Interactive code editor with live editing and line numbers"
+                      title="Interactive code editor with line numbers"
                     >
                       <Code2 className="w-3.5 h-3.5" />
                       <span>Editor</span>
@@ -1043,27 +1601,12 @@ LIMIT 50;`;
                     </button>
                   </div>
 
-                  {/* Find & Replace Toggle Button */}
-                  <button
-                    type="button"
-                    onClick={() => setShowFindReplace(!showFindReplace)}
-                    className={`px-2.5 py-1 text-xs rounded-lg border flex items-center gap-1.5 transition-colors ${
-                      showFindReplace
-                        ? 'bg-indigo-950/80 text-indigo-300 border-indigo-700'
-                        : 'bg-slate-900 text-slate-400 hover:text-slate-200 border-slate-800 hover:border-slate-700'
-                    }`}
-                    title="Find & Replace in query (e.g. replace 'demo' with 'the')"
-                  >
-                    <Replace className="w-3.5 h-3.5 text-indigo-400" />
-                    <span className="hidden sm:inline">Find & Replace</span>
-                  </button>
-
-                  {/* Custom Edited Badge & Revert Button */}
+                  {/* Custom Edited Revert Button */}
                   {isCustomEdited && (
                     <div className="flex items-center gap-1.5">
                       <span className="px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/30 flex items-center gap-1">
                         <Pencil className="w-3 h-3" />
-                        <span>Edited</span>
+                        <span className="hidden sm:inline">Edited</span>
                       </span>
                       <button
                         type="button"
@@ -1076,85 +1619,46 @@ LIMIT 50;`;
                       </button>
                     </div>
                   )}
-
-                  {/* Parameter Injection Toggle */}
-                  <div className="inline-flex rounded-lg p-0.5 bg-slate-900 border border-slate-800 text-xs">
-                    <button
-                      type="button"
-                      onClick={() => setParameterized(false)}
-                      className={`px-2.5 py-1 rounded-md font-medium transition-all ${
-                        !parameterized
-                          ? 'bg-indigo-600 text-white shadow-sm'
-                          : 'text-slate-400 hover:text-slate-200'
-                      }`}
-                      title="Substitute live values directly into SQL (ready to paste in DBeaver/psql)"
-                    >
-                      Injected ({loginId || '100234'})
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setParameterized(true)}
-                      className={`px-2.5 py-1 rounded-md font-medium transition-all ${
-                        parameterized
-                          ? 'bg-indigo-600 text-white shadow-sm'
-                          : 'text-slate-400 hover:text-slate-200'
-                      }`}
-                      title="Keep prepared statement parameters (:loginId, :startDate)"
-                    >
-                      Parameterized (:loginId)
-                    </button>
-                  </div>
                 </div>
 
-                {/* Action Buttons: Save Script, Copy, Download */}
-                <div className="flex items-center gap-2">
+                {/* Right side: Save Script, Copy, Download */}
+                <div className="flex items-center gap-2 shrink-0">
                   {activeUserScript ? (
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={handleUpdateCurrentScript}
-                        disabled={!isCustomEdited}
-                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:hover:bg-emerald-600 text-white transition-colors shadow-sm active:scale-95"
-                        title="Save modifications to this script"
-                      >
-                        <Save className="w-3.5 h-3.5" />
-                        <span>Save Changes</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleOpenSaveAsScript}
-                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors"
-                        title="Save as a separate script copy"
-                      >
-                        <BookmarkPlus className="w-3.5 h-3.5 text-cyan-400" />
-                        <span>Save As Copy</span>
-                      </button>
-                    </div>
+                    <button
+                      type="button"
+                      onClick={handleUpdateCurrentScript}
+                      disabled={!isCustomEdited}
+                      className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:hover:bg-emerald-600 text-white transition-colors shadow-sm active:scale-95"
+                      title="Save modifications to this script"
+                    >
+                      <Save className="w-3.5 h-3.5" />
+                      <span className="hidden sm:inline">Save Changes</span>
+                    </button>
                   ) : (
                     <button
                       type="button"
                       onClick={handleOpenSaveAsScript}
-                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white transition-all shadow-sm active:scale-95"
-                      title="Save this tweaked query as a new reusable script"
+                      className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white transition-all shadow-sm active:scale-95"
+                      title="Save as custom reusable script"
                     >
                       <BookmarkPlus className="w-3.5 h-3.5" />
-                      <span>Save as Script</span>
+                      <span className="hidden sm:inline">Save Script</span>
                     </button>
                   )}
 
                   <button
                     type="button"
                     onClick={handleCopySql}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors shadow-sm active:scale-95"
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors shadow-sm active:scale-95"
                   >
                     {copiedSql ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                    <span>{copiedSql ? 'Copied!' : 'Copy'}</span>
+                    <span>{copiedSql ? 'Copied' : 'Copy'}</span>
                   </button>
 
                   <button
                     type="button"
                     onClick={handleDownloadSql}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors"
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors"
                     title="Download as .sql file"
                   >
                     <Download className="w-3.5 h-3.5 text-slate-400" />
@@ -1162,151 +1666,555 @@ LIMIT 50;`;
                 </div>
               </div>
 
-              {/* Find & Replace Bar */}
-              {showFindReplace && (
-                <div className="bg-slate-950/95 border-b border-slate-800/90 px-4 py-2.5 flex flex-wrap items-center gap-3 text-xs shadow-inner">
+              {/* Editor / Preview Body with Non-Editable BEGIN; and ROLLBACK; */}
+              <div className="flex flex-col bg-slate-950 overflow-hidden">
+                {/* Fixed Non-Editable Header Line: BEGIN; */}
+                <div className="flex items-center px-3 py-1.5 bg-slate-950 border-b border-slate-800/80 font-mono text-xs sm:text-[13px] select-none shrink-0">
                   <div className="flex items-center gap-2">
-                    <span className="text-slate-400 font-mono text-[11px] uppercase tracking-wider">Find:</span>
-                    <input
-                      type="text"
-                      value={findText}
-                      onChange={(e) => setFindText(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault();
-                          handleReplaceNext();
-                        }
+                    <span className="text-slate-600 text-right font-mono" style={{ minWidth: '32px' }}>
+                      1
+                    </span>
+                    <span className="text-purple-400 font-bold tracking-wide">BEGIN;</span>
+                  </div>
+                </div>
+
+                {/* Middle Editable / Preview Query Area (Expanded Vertical Height) */}
+                {viewMode === 'editor' ? (
+                  <div className="flex relative bg-slate-950 h-[280px] sm:h-[320px] overflow-hidden">
+                    {/* Line Numbers Gutter */}
+                    <div
+                      ref={lineNumbersRef}
+                      className="select-none py-2 px-2 sm:px-3 text-right font-mono text-xs sm:text-[13px] leading-[22px] text-slate-600 bg-slate-950 border-r border-slate-800/70 shrink-0 overflow-hidden"
+                      style={{ minWidth: '38px' }}
+                    >
+                      {editorSql.split('\n').map((_, idx) => (
+                        <div key={idx} className="h-[22px]">
+                          {idx + 2}
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Editable Code Textarea */}
+                    <textarea
+                      ref={textareaRef}
+                      value={editorSql}
+                      onChange={(e) => {
+                        setEditorSql(e.target.value);
+                        setIsCustomEdited(true);
                       }}
-                      placeholder="e.g. demo"
-                      className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-slate-100 font-mono text-xs w-32 sm:w-40 focus:outline-none focus:border-indigo-500"
+                      onScroll={handleScrollSync}
+                      onKeyDown={handleEditorKeyDown}
+                      spellCheck={false}
+                      wrap="off"
+                      placeholder="-- Write the query here"
+                      className="flex-1 bg-transparent p-2 font-mono text-xs sm:text-[13px] leading-[22px] text-slate-100 placeholder-slate-600 focus:outline-none resize-none overflow-auto custom-scrollbar selection:bg-indigo-600 selection:text-white"
+                      style={{ tabSize: 2 }}
                     />
                   </div>
+                ) : (
+                  <div className="relative bg-slate-950 p-2 font-mono text-xs sm:text-[13px] leading-relaxed overflow-auto custom-scrollbar h-[280px] sm:h-[320px] text-slate-100 selection:bg-indigo-600 selection:text-white">
+                    <pre className="whitespace-pre">
+                      {(editorSql || '-- Write the query here').split('\n').map((line, idx) => (
+                        <div key={idx} className="table-row">
+                          <span className="table-cell select-none text-slate-600 pr-3 text-right text-xs" style={{ minWidth: '38px' }}>
+                            {idx + 2}
+                          </span>
+                          <span className="table-cell">
+                            {formatSqlLine(line)}
+                          </span>
+                        </div>
+                      ))}
+                    </pre>
+                  </div>
+                )}
+
+                {/* Fixed Non-Editable Footer Line: ROLLBACK; */}
+                <div className="flex items-center px-3 py-1.5 bg-slate-950 border-t border-slate-800/80 font-mono text-xs sm:text-[13px] select-none shrink-0">
                   <div className="flex items-center gap-2">
-                    <span className="text-slate-400 font-mono text-[11px] uppercase tracking-wider">Replace:</span>
-                    <input
-                      type="text"
-                      value={replaceText}
-                      onChange={(e) => setReplaceText(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault();
-                          handleReplaceAll();
-                        }
-                      }}
-                      placeholder="e.g. the"
-                      className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-slate-100 font-mono text-xs w-32 sm:w-40 focus:outline-none focus:border-indigo-500"
-                    />
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={handleReplaceAll}
-                      disabled={!findText}
-                      className="px-2.5 py-1 rounded-md bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white font-medium text-xs transition-colors shadow-sm"
-                    >
-                      Replace All
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleReplaceNext}
-                      disabled={!findText}
-                      className="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 border border-slate-700 disabled:opacity-40 text-slate-200 font-medium text-xs transition-colors"
-                    >
-                      Replace Next
-                    </button>
-                    {findStatus && (
-                      <span className="text-cyan-300 font-mono text-xs ml-1 bg-cyan-950/60 border border-cyan-800/40 px-2 py-0.5 rounded">
-                        {findStatus}
-                      </span>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => setShowFindReplace(false)}
-                      className="text-slate-500 hover:text-slate-300 ml-auto p-1"
-                      title="Close Find & Replace"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
+                    <span className="text-slate-600 text-right font-mono" style={{ minWidth: '32px' }}>
+                      {editorSql.split('\n').length + 2}
+                    </span>
+                    <span className="text-rose-400 font-bold tracking-wide">ROLLBACK;</span>
                   </div>
                 </div>
-              )}
+              </div>
 
-              {/* Code Display Area (Editable Textarea with Line Numbers, or Syntax Preview) */}
-              {viewMode === 'editor' ? (
-                <div className="flex-1 flex relative bg-slate-950 min-h-[500px] overflow-hidden">
-                  {/* Line Numbers Gutter */}
-                  <div
-                    ref={lineNumbersRef}
-                    className="select-none py-4 px-3 text-right font-mono text-[13px] leading-[22px] text-slate-600 bg-slate-950 border-r border-slate-800/70 shrink-0 overflow-hidden"
-                    style={{ minWidth: '48px' }}
-                  >
-                    {editorSql.split('\n').map((_, idx) => (
-                      <div key={idx} className="h-[22px]">
-                        {idx + 1}
-                      </div>
-                    ))}
-                  </div>
-
-                  {/* Editable Code Textarea */}
-                  <textarea
-                    ref={textareaRef}
-                    value={editorSql}
-                    onChange={(e) => {
-                      setEditorSql(e.target.value);
-                      setIsCustomEdited(e.target.value !== generatedSql);
-                    }}
-                    onScroll={handleScrollSync}
-                    onKeyDown={handleEditorKeyDown}
-                    spellCheck={false}
-                    wrap="off"
-                    placeholder="Type, edit, or tweak your SQL query here..."
-                    className="flex-1 bg-transparent p-4 font-mono text-[13px] leading-[22px] text-slate-100 placeholder-slate-600 focus:outline-none resize-none overflow-auto selection:bg-indigo-600 selection:text-white"
-                    style={{ tabSize: 2 }}
-                  />
-                </div>
-              ) : (
-                <div className="flex-1 relative bg-slate-950 p-4 font-mono text-[13px] leading-relaxed overflow-auto min-h-[500px] text-slate-100 selection:bg-indigo-600 selection:text-white">
-                  <pre className="whitespace-pre">
-                    {(editorSql || generatedSql).split('\n').map((line, idx) => (
-                      <div key={idx} className="table-row">
-                        <span className="table-cell select-none text-slate-600 pr-4 text-right text-xs">
-                          {idx + 1}
-                        </span>
-                        <span className="table-cell">
-                          {formatSqlLine(line)}
-                        </span>
-                      </div>
-                    ))}
-                  </pre>
-                </div>
-              )}
-
-              {/* Footer Status Bar */}
-              <div className="border-t border-slate-800/80 bg-slate-950 px-4 py-2.5 flex items-center justify-between text-[11px] text-slate-500 font-mono">
-                <div className="flex items-center gap-3">
-                  <span>Dialect: PostgreSQL 15+</span>
-                  <span>•</span>
-                  <span>Mode: {parameterized ? 'PREPARED_STMT' : 'LITERAL_INJECTION'}</span>
-                  <span>•</span>
-                  <span>{editorSql.split('\n').length} lines</span>
+              {/* Editor Sub-Status Bar */}
+              <div className="border-t border-slate-800/80 bg-slate-950 px-3.5 py-1.5 flex items-center justify-between text-[10px] sm:text-[11px] text-slate-500 font-mono">
+                <div className="flex items-center gap-2.5">
+                  <span>{editorSql.split('\n').length + 2} lines</span>
                   <span>•</span>
                   <span>{editorSql.length} chars</span>
                 </div>
+                {isCustomEdited ? (
+                  <span className="text-amber-400 font-sans font-semibold flex items-center gap-1">
+                    <Pencil className="w-3 h-3" /> Custom Query
+                  </span>
+                ) : activeTemplate ? (
+                  <span className="text-emerald-400 flex items-center gap-1">
+                    <Check className="w-3 h-3" /> Preset Validated
+                  </span>
+                ) : (
+                  <span className="text-slate-400 flex items-center gap-1">
+                    <Terminal className="w-3 h-3 text-indigo-400" /> Ready to Edit
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {/* -------------------------------------------------------
+                BOTTOM CARD: DEDICATED "RESULT BOX" (LIVE QUERY OUTPUT)
+            ------------------------------------------------------- */}
+            <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg flex flex-col">
+              
+              {/* Header: Result Box Title & Viewport Controls */}
+              <div className="border-b border-slate-800 bg-slate-950/80 px-3.5 sm:px-4 py-2.5 flex flex-wrap items-center justify-between gap-2.5 shrink-0">
                 <div className="flex items-center gap-2">
-                  {isCustomEdited ? (
-                    <span className="text-amber-400 font-sans font-semibold flex items-center gap-1">
-                      <Pencil className="w-3 h-3" /> Custom Tweaks Active
-                    </span>
-                  ) : (
-                    <div className="flex items-center gap-1.5">
-                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                      <span className="text-slate-400">Query Validated</span>
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-slate-200 font-mono tracking-tight">
+                    <Table className="w-4 h-4 text-emerald-400" />
+                    <span>RESULT</span>
+                  </div>
+                  {queryResult && queryResult.success && (
+                    <div className="flex items-center gap-1.5 font-mono text-[11px]">
+                      <span className="text-emerald-400 font-semibold px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/25">
+                        {queryResult.rows ? queryResult.rows.length : (queryResult.rowCount || 0)} rows
+                      </span>
+                      {queryResult.executionTimeMs !== undefined && (
+                        <span className="text-slate-400">
+                          in {queryResult.executionTimeMs}ms
+                        </span>
+                      )}
                     </div>
                   )}
+                </div>
+
+                {/* Result Controls (Search Filter, Height Toggle, Page Size, CSV, JSON) */}
+                {queryResult && queryResult.success && queryResult.rows && queryResult.rows.length > 0 && (
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {/* Live Search Filter */}
+                    <div className="relative">
+                      <Search className="w-3.5 h-3.5 absolute left-2.5 top-2 text-slate-500" />
+                      <input
+                        type="text"
+                        value={resultSearchQuery}
+                        onChange={(e) => {
+                          setResultSearchQuery(e.target.value);
+                          setCurrentPage(1);
+                        }}
+                        placeholder="Search in results..."
+                        className="bg-slate-900 border border-slate-700/80 rounded-lg pl-8 pr-7 py-1 text-xs text-slate-200 placeholder-slate-500 w-28 sm:w-36 focus:outline-none focus:border-indigo-500 font-mono"
+                      />
+                      {resultSearchQuery && (
+                        <button
+                          type="button"
+                          onClick={() => setResultSearchQuery('')}
+                          className="absolute right-2 top-1.5 text-slate-500 hover:text-slate-300"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Table Box Height Selector: Standard vs Tall */}
+                    <div className="hidden sm:flex items-center gap-1 bg-slate-900 border border-slate-800 rounded-lg p-0.5 text-[11px] font-mono">
+                      <span className="text-slate-500 px-1 text-[10px] uppercase">Box:</span>
+                      {(['standard', 'tall'] as const).map((mode) => (
+                        <button
+                          key={mode}
+                          type="button"
+                          onClick={() => setTableBoxHeight(mode)}
+                          className={`px-2 py-0.5 rounded text-[11px] capitalize transition-colors ${
+                            tableBoxHeight === mode
+                              ? 'bg-emerald-600 text-white font-semibold'
+                              : 'text-slate-400 hover:text-slate-200'
+                          }`}
+                          title={`${mode.toUpperCase()} table box height with separate scrollbar`}
+                        >
+                          {mode === 'standard' ? 'Standard' : 'Tall'}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Page Size Selector */}
+                    <div className="hidden md:flex items-center gap-1 bg-slate-900 border border-slate-800 rounded-lg p-0.5 text-[11px] font-mono">
+                      <span className="text-slate-500 px-1 text-[10px] uppercase">Page:</span>
+                      {[50, 100, 250, 0].map((sz) => (
+                        <button
+                          key={sz}
+                          type="button"
+                          onClick={() => {
+                            setRowsPerPage(sz);
+                            setCurrentPage(1);
+                          }}
+                          className={`px-1.5 py-0.5 rounded text-xs transition-colors ${
+                            rowsPerPage === sz
+                              ? 'bg-indigo-600 text-white font-semibold'
+                              : 'text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          {sz === 0 ? 'All' : sz}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Download CSV */}
+                    <button
+                      type="button"
+                      onClick={handleDownloadCsv}
+                      className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 hover:text-white transition-colors text-xs"
+                      title="Download results as CSV"
+                    >
+                      <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+                      <span className="hidden sm:inline">CSV</span>
+                    </button>
+
+                    {/* Copy JSON */}
+                    <button
+                      type="button"
+                      onClick={handleCopyResultJson}
+                      className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 hover:text-white transition-colors text-xs"
+                      title="Copy result rows as JSON"
+                    >
+                      {copiedResultJson ? (
+                        <Check className="w-3.5 h-3.5 text-emerald-400" />
+                      ) : (
+                        <Copy className="w-3.5 h-3.5 text-slate-400" />
+                      )}
+                      <span className="hidden sm:inline">{copiedResultJson ? 'Copied' : 'JSON'}</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Result Box Body Content */}
+              <div className="p-3 sm:p-4 flex flex-col bg-slate-950">
+                {isExecuting ? (
+                  /* State 1: Executing */
+                  <div className="flex-1 flex flex-col items-center justify-center p-8 text-center my-auto">
+                    <div className="w-14 h-14 rounded-2xl bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center text-emerald-400 mb-4 animate-pulse">
+                      <Loader2 className="w-7 h-7 animate-spin" />
+                    </div>
+                    <h4 className="text-base font-bold text-white font-heading mb-1">
+                      Executing Query Against Neon DB...
+                    </h4>
+                    <p className="text-xs text-slate-400 max-w-sm mb-3">
+                      Streaming uncapped result rows from your restored database.
+                    </p>
+                    <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-slate-900 border border-slate-800 font-mono text-xs text-emerald-400">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                      <span>Elapsed: {execElapsed}s</span>
+                    </div>
+                  </div>
+                ) : !dbHealth.connected ? (
+                  /* State 2: Disconnected */
+                  <div className="flex-1 flex flex-col items-center justify-center p-8 text-center my-auto max-w-md mx-auto">
+                    <div className="w-14 h-14 rounded-2xl bg-rose-500/10 border border-rose-500/25 flex items-center justify-center text-rose-400 mb-4">
+                      <WifiOff className="w-7 h-7" />
+                    </div>
+                    <h4 className="text-base font-bold text-white font-heading mb-1.5">
+                      Neon Database Not Connected
+                    </h4>
+                    <p className="text-xs text-slate-400 leading-relaxed mb-4">
+                      Connect your Neon PostgreSQL database holding your production dump to execute queries and view live results directly in Que_Me.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setIsConnModalOpen(true)}
+                      className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold text-xs shadow-md transition-all active:scale-95"
+                    >
+                      <Database className="w-4 h-4" />
+                      <span>Connect Neon Database</span>
+                    </button>
+                  </div>
+                ) : !queryResult ? (
+                  /* State 3: Ready, No Query Executed Yet */
+                  <div className="flex-1 flex flex-col items-center justify-center p-8 text-center my-auto max-w-md mx-auto">
+                    <div className="w-14 h-14 rounded-2xl bg-indigo-500/10 border border-indigo-500/25 flex items-center justify-center text-indigo-400 mb-4">
+                      <Play className="w-7 h-7 ml-0.5 fill-current" />
+                    </div>
+                    <h4 className="text-base font-bold text-white font-heading mb-1.5">
+                      Ready to Execute
+                    </h4>
+                    <p className="text-xs text-slate-400 leading-relaxed mb-4">
+                      Connected to <span className="text-emerald-400 font-mono">{dbHealth.database}</span>. Click "Run Query" or press <kbd className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 font-mono text-slate-300">Ctrl + Enter</kbd> to execute this query live.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={handleExecuteQuery}
+                      className="flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs shadow-md transition-all active:scale-95"
+                    >
+                      <Play className="w-4 h-4 fill-current" />
+                      <span>Run Query Now</span>
+                    </button>
+                  </div>
+                ) : !queryResult.success ? (
+                  /* State 4: Query Failed */
+                  <div className="my-auto max-w-xl mx-auto w-full">
+                    <div className="bg-rose-950/40 border border-rose-800/80 rounded-2xl p-5 shadow-xl text-left">
+                      <div className="flex items-center gap-3 mb-3">
+                        <div className="w-9 h-9 rounded-xl bg-rose-500/20 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
+                          <AlertCircle className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <h4 className="text-sm font-bold text-rose-200 font-mono uppercase tracking-wide">
+                            PostgreSQL Execution Error
+                          </h4>
+                          {queryResult.code && (
+                            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30">
+                              Error Code: {queryResult.code}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="bg-slate-950/80 border border-rose-900/40 rounded-xl p-3.5 mb-3 font-mono text-xs text-rose-300 leading-relaxed overflow-x-auto whitespace-pre-wrap">
+                        {queryResult.error}
+                      </div>
+
+                      {queryResult.hint && (
+                        <div className="text-xs text-slate-300 mb-3 bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+                          <span className="font-semibold text-amber-400">Hint: </span>
+                          {queryResult.hint}
+                        </div>
+                      )}
+
+                      {queryResult.detail && (
+                        <div className="text-xs text-slate-400 mb-3 bg-slate-900/60 p-2.5 rounded-lg border border-slate-800">
+                          <span className="font-semibold text-slate-300">Detail: </span>
+                          {queryResult.detail}
+                        </div>
+                      )}
+
+                      <div className="flex items-center justify-between pt-2 border-t border-rose-900/30 text-xs">
+                        <span className="text-slate-500 font-mono text-[11px]">
+                          Failed in {queryResult.executionTimeMs}ms • {queryResult.executedAt}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                ) : !queryResult.rows || queryResult.rows.length === 0 ? (
+                  /* State 5: Mutation Success (0 rows returned) */
+                  <div className="my-auto max-w-md mx-auto w-full text-center">
+                    <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 shadow-xl">
+                      <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center text-emerald-400 mx-auto mb-3">
+                        <CheckCircle2 className="w-6 h-6" />
+                      </div>
+                      <h4 className="text-base font-bold text-white font-heading mb-1">
+                        Query Executed Successfully
+                      </h4>
+                      <p className="text-xs text-slate-400 mb-4">
+                        Statement executed without returning row data.
+                      </p>
+
+                      <div className="grid grid-cols-2 gap-2 bg-slate-950 p-3 rounded-xl border border-slate-800 text-xs font-mono mb-2 text-left">
+                        <div>
+                          <span className="text-slate-500 block text-[10px] uppercase">Command:</span>
+                          <span className="text-slate-200 font-semibold">{queryResult.command}</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 block text-[10px] uppercase">Affected Rows:</span>
+                          <span className="text-emerald-400 font-semibold">{queryResult.rowCount}</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 block text-[10px] uppercase">Duration:</span>
+                          <span className="text-slate-200">{queryResult.executionTimeMs} ms</span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 block text-[10px] uppercase">Executed:</span>
+                          <span className="text-slate-400">{queryResult.executedAt}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  /* State 6: Interactive Data Table Grid (Compact Box with Separate Scrollbar) */
+                  <div className="flex flex-col min-h-0">
+                    <div
+                      className={`overflow-auto custom-scrollbar rounded-xl border border-slate-800 bg-slate-950/60 shadow-inner ${
+                        tableBoxHeight === 'tall'
+                          ? 'h-[480px] sm:h-[540px]'
+                          : 'h-[360px] sm:h-[400px]'
+                      }`}
+                    >
+                      <table className="w-full text-left text-xs border-collapse">
+                        <thead className="sticky top-0 bg-slate-900 border-b border-slate-800 text-slate-300 font-mono text-[11px] uppercase tracking-wider z-10 shadow-sm">
+                          <tr>
+                            <th className="py-2.5 px-3 w-12 text-center text-slate-500 bg-slate-900 border-r border-slate-800/80 select-none sticky left-0 z-20">
+                              #
+                            </th>
+                            {(queryResult.columns && queryResult.columns.length > 0
+                              ? queryResult.columns.map((c) => c.name)
+                              : Object.keys(queryResult.rows[0])
+                            ).map((colName) => (
+                              <th
+                                key={colName}
+                                onClick={() => {
+                                  if (sortColumn === colName) {
+                                    if (sortDirection === 'asc') setSortDirection('desc');
+                                    else setSortColumn(null);
+                                  } else {
+                                    setSortColumn(colName);
+                                    setSortDirection('asc');
+                                  }
+                                }}
+                                className="py-2.5 px-3.5 hover:bg-slate-800/80 cursor-pointer select-none transition-colors border-r border-slate-800/60 group"
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className={sortColumn === colName ? 'text-indigo-400 font-bold' : ''}>
+                                    {colName}
+                                  </span>
+                                  <span className="text-slate-500 group-hover:text-slate-300">
+                                    {sortColumn === colName ? (
+                                      sortDirection === 'asc' ? (
+                                        <ArrowUp className="w-3 h-3 text-indigo-400" />
+                                      ) : (
+                                        <ArrowDown className="w-3 h-3 text-indigo-400" />
+                                      )
+                                    ) : (
+                                      <ArrowUpDown className="w-3 h-3 opacity-30 group-hover:opacity-100" />
+                                    )}
+                                  </span>
+                                </div>
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800/60 font-mono text-[12px]">
+                          {paginatedRows.length === 0 ? (
+                            <tr>
+                              <td
+                                colSpan={
+                                  (queryResult.columns?.length || Object.keys(queryResult.rows[0]).length) + 1
+                                }
+                                className="py-8 text-center text-slate-500 italic"
+                              >
+                                No rows match "{resultSearchQuery}".
+                              </td>
+                            </tr>
+                          ) : (
+                            paginatedRows.map((row, rowIdx) => {
+                              const absoluteIdx = (currentPage - 1) * (rowsPerPage || paginatedRows.length) + rowIdx + 1;
+                              const cols =
+                                queryResult.columns && queryResult.columns.length > 0
+                                  ? queryResult.columns.map((c) => c.name)
+                                  : Object.keys(queryResult.rows![0]);
+
+                              return (
+                                <tr
+                                  key={rowIdx}
+                                  className="odd:bg-slate-950 even:bg-slate-900/30 hover:bg-indigo-950/30 transition-colors"
+                                >
+                                  <td className="py-2 px-3 text-center text-[10px] text-slate-600 bg-slate-950/50 border-r border-slate-800/60 select-none">
+                                    {absoluteIdx}
+                                  </td>
+                                  {cols.map((col) => {
+                                    const val = row[col];
+                                    return (
+                                      <td
+                                        key={col}
+                                        className="py-2 px-3.5 border-r border-slate-800/40 text-slate-200 truncate max-w-[280px]"
+                                        title={val !== null && val !== undefined ? String(val) : 'NULL'}
+                                      >
+                                        {val === null || val === undefined ? (
+                                          <span className="text-slate-600 italic text-[11px]">NULL</span>
+                                        ) : typeof val === 'boolean' ? (
+                                          <span
+                                            className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                              val
+                                                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                                                : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                                            }`}
+                                          >
+                                            {String(val)}
+                                          </span>
+                                        ) : typeof val === 'object' ? (
+                                          <span className="text-cyan-300 text-xs">
+                                            {JSON.stringify(val)}
+                                          </span>
+                                        ) : typeof val === 'number' ? (
+                                          <span className="text-emerald-300 font-semibold">
+                                            {val}
+                                          </span>
+                                        ) : (
+                                          <span>{String(val)}</span>
+                                        )}
+                                      </td>
+                                    );
+                                  })}
+                                </tr>
+                              );
+                            })
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Pagination Navigation */}
+                    {rowsPerPage > 0 && totalPages > 1 && (
+                      <div className="pt-2.5 flex items-center justify-between text-xs text-slate-400 font-mono shrink-0">
+                        <div>
+                          Showing {(currentPage - 1) * rowsPerPage + 1} to{' '}
+                          {Math.min(currentPage * rowsPerPage, filteredAndSortedRows.length)} of{' '}
+                          {filteredAndSortedRows.length} rows
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            disabled={currentPage <= 1}
+                            onClick={() => setCurrentPage((p) => Math.max(p - 1, 1))}
+                            className="px-2.5 py-1 rounded bg-slate-900 border border-slate-800 hover:bg-slate-800 disabled:opacity-40 text-slate-200 transition-colors"
+                          >
+                            Prev
+                          </button>
+                          <span className="px-2 text-slate-300">
+                            {currentPage} / {totalPages}
+                          </span>
+                          <button
+                            type="button"
+                            disabled={currentPage >= totalPages}
+                            onClick={() => setCurrentPage((p) => Math.min(p + 1, totalPages))}
+                            className="px-2.5 py-1 rounded bg-slate-900 border border-slate-800 hover:bg-slate-800 disabled:opacity-40 text-slate-200 transition-colors"
+                          >
+                            Next
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Result Box Status Bar */}
+              <div className="border-t border-slate-800/80 bg-slate-950 px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-[10px] sm:text-[11px] text-slate-500 font-mono">
+                {queryResult ? (
+                  <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+                    <span className="text-slate-300">DB: {dbHealth.database || 'Neon'}</span>
+                    <span>•</span>
+                    <span className={queryResult.success ? 'text-emerald-400 font-semibold' : 'text-rose-400 font-semibold'}>
+                      {queryResult.success ? `${queryResult.command || 'QUERY'} SUCCESS` : 'FAILED'}
+                    </span>
+                    <span>•</span>
+                    <span>{queryResult.rowCount} rows</span>
+                    <span>•</span>
+                    <span>{queryResult.executionTimeMs} ms</span>
+                    <span>•</span>
+                    <span>{queryResult.executedAt}</span>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <span className="text-slate-400">Status: Idle</span>
+                    <span>•</span>
+                    <span>Connected to Neon PostgreSQL</span>
+                  </div>
+                )}
+                <div className="flex items-center gap-1.5 shrink-0 ml-auto sm:ml-0">
+                  <span className={`w-2 h-2 rounded-full ${dbHealth.connected ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`} />
+                  <span className="text-slate-400">{dbHealth.connected ? (dbHealth.host || 'Neon Connected') : 'Disconnected'}</span>
                 </div>
               </div>
 
             </div>
+
           </div>
 
         </div>
@@ -1316,9 +2224,9 @@ LIMIT 50;`;
           SAVE AS SCRIPT / WRITE NEW SCRIPT MODAL
       ========================================================= */}
       {isScriptModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-700/80 rounded-2xl w-full max-w-xl shadow-2xl overflow-hidden flex flex-col animate-in fade-in zoom-in-95 duration-150">
-            <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/70">
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-3.5 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700/80 rounded-2xl w-full max-w-xl shadow-2xl overflow-hidden flex flex-col my-auto max-h-[92vh] animate-in fade-in zoom-in-95 duration-150">
+            <div className="px-5 sm:px-6 py-3.5 sm:py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/70 shrink-0">
               <div className="flex items-center gap-2.5">
                 <BookmarkPlus className="w-5 h-5 text-emerald-400" />
                 <h3 className="text-base font-bold text-white font-heading">
@@ -1334,7 +2242,7 @@ LIMIT 50;`;
               </button>
             </div>
 
-            <form onSubmit={handleSaveScriptSubmit} className="p-6 space-y-4">
+            <form onSubmit={handleSaveScriptSubmit} className="p-4 sm:p-6 space-y-4 overflow-y-auto flex-1">
               <div>
                 <label className="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5">
                   Script Title *
@@ -1412,6 +2320,341 @@ LIMIT 50;`;
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================
+          NEON DATABASE CONNECTION SETTINGS MODAL
+      ========================================================= */}
+      {isConnModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-3.5 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700/80 rounded-2xl w-full max-w-xl shadow-2xl overflow-hidden flex flex-col my-auto max-h-[92vh] animate-in fade-in zoom-in-95 duration-150">
+            <div className="px-5 sm:px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/70 shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-500 flex items-center justify-center shadow-lg shadow-emerald-500/20 text-white font-bold text-sm">
+                  <Database className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white font-heading">
+                    Neon Database Connection
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Connect your Neon PostgreSQL instance
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsConnModalOpen(false)}
+                className="text-slate-400 hover:text-white transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveConnection} className="p-5 sm:p-6 space-y-4 overflow-y-auto flex-1 text-slate-200">
+              {/* Active Connection Pill / Card if connected */}
+              {dbHealth.connected && (
+                <div className="p-3.5 rounded-xl bg-emerald-950/40 border border-emerald-500/30 flex items-center justify-between gap-3 text-xs">
+                  <div className="flex items-center gap-2.5">
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                    <div>
+                      <div className="font-semibold text-emerald-300 font-mono">
+                        Connected to: {dbHealth.database}
+                      </div>
+                      <div className="text-[11px] text-slate-400 font-mono truncate max-w-xs">
+                        {dbHealth.host} • {dbHealth.version} ({dbHealth.latencyMs}ms)
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleDisconnect}
+                    className="px-2.5 py-1 rounded-lg bg-rose-950/60 hover:bg-rose-900 border border-rose-700/60 text-rose-300 text-xs font-medium transition-colors shrink-0"
+                  >
+                    Disconnect
+                  </button>
+                </div>
+              )}
+
+              {/* Connection String Input */}
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5">
+                  Neon Connection String (DATABASE_URL) *
+                </label>
+                <div className="relative">
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    required
+                    value={inputConnUrl}
+                    onChange={(e) => setInputConnUrl(e.target.value)}
+                    placeholder="postgresql://user:password@ep-xyz-pooler.region.aws.neon.tech/neondb?sslmode=require"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-3.5 pr-10 py-2.5 text-xs sm:text-sm text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-3 top-3 text-slate-500 hover:text-slate-300"
+                    title={showPassword ? 'Hide password' : 'Show password'}
+                  >
+                    {showPassword ? <Eye className="w-4 h-4" /> : <Eye className="w-4 h-4 opacity-50" />}
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-500 mt-1 font-mono">
+                  Recommended: Use the pooled connection string (<span className="text-slate-400">-pooler</span>) from Neon console.
+                </p>
+              </div>
+
+              {/* Test Status Feedback Alert */}
+              {connTestStatus.testing ? (
+                <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center gap-2.5 text-xs text-slate-300 font-mono">
+                  <Loader2 className="w-4 h-4 animate-spin text-emerald-400" />
+                  <span>Testing connection to Neon PostgreSQL...</span>
+                </div>
+              ) : connTestStatus.message ? (
+                <div
+                  className={`p-3 rounded-xl border flex items-center gap-2.5 text-xs font-mono ${
+                    connTestStatus.success
+                      ? 'bg-emerald-950/40 border-emerald-500/30 text-emerald-300'
+                      : 'bg-rose-950/40 border-rose-500/30 text-rose-300'
+                  }`}
+                >
+                  {connTestStatus.success ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  ) : (
+                    <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                  )}
+                  <span>{connTestStatus.message}</span>
+                </div>
+              ) : null}
+
+              {/* Quick Guide on where to find credentials */}
+              <div className="bg-slate-950/60 border border-slate-800/80 rounded-xl p-3.5 text-xs space-y-1.5 text-slate-400">
+                <div className="font-semibold text-slate-200 flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wide">
+                  <Info className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Where to find this in Neon</span>
+                </div>
+                <ol className="list-decimal list-inside space-y-1 text-[11px] leading-relaxed">
+                  <li>Log into <a href="https://console.neon.tech" target="_blank" rel="noreferrer" className="text-indigo-400 underline hover:text-indigo-300">console.neon.tech</a> and select your project.</li>
+                  <li>On the Dashboard, find the <strong>Connection Details</strong> widget.</li>
+                  <li>Select <strong>Pooled connection</strong> and copy the connection string.</li>
+                  <li>Paste it above, click <strong>Test Connection</strong>, then <strong>Save & Connect</strong>.</li>
+                </ol>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="pt-2 flex items-center justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={handleTestConnection}
+                  disabled={!inputConnUrl.trim() || connTestStatus.testing}
+                  className="px-3.5 py-2 rounded-xl text-xs font-semibold text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 disabled:opacity-40 transition-colors flex items-center gap-1.5"
+                >
+                  <Wifi className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Test Connection</span>
+                </button>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsConnModalOpen(false)}
+                    className="px-3.5 py-2 rounded-xl text-xs font-medium text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={!inputConnUrl.trim() || isSavingConn}
+                    className="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-40 text-white font-semibold text-xs shadow-md transition-all active:scale-95 flex items-center gap-1.5"
+                  >
+                    {isSavingConn ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                    <span>{isSavingConn ? 'Connecting...' : 'Save & Connect'}</span>
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================
+          DUMP SQL FILE & POPULATE DATABASE MODAL
+      ========================================================= */}
+      {isDumpModalOpen && dumpFileMeta && (
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-3.5 sm:p-4 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-700/80 rounded-2xl w-full max-w-xl shadow-2xl overflow-hidden flex flex-col my-auto max-h-[92vh] animate-in fade-in zoom-in-95 duration-150">
+            <div className="px-5 sm:px-6 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/70 shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-indigo-600 to-cyan-500 flex items-center justify-center shadow-lg shadow-indigo-500/20 text-white font-bold text-sm">
+                  <Database className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white font-heading">
+                    Populate Neon DB from SQL Dump
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    Execute your .sql dump file to build tables and load records
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!isPopulatingDb) {
+                    setIsDumpModalOpen(false);
+                    setDumpFileMeta(null);
+                    setSelectedDumpFile(null);
+                    setDumpResultStatus(null);
+                  }
+                }}
+                disabled={isPopulatingDb}
+                className="text-slate-400 hover:text-white transition-colors disabled:opacity-30"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-5 sm:p-6 space-y-4 overflow-y-auto flex-1 text-slate-200 text-xs">
+              
+              {/* Target DB Banner */}
+              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className={`w-2 h-2 rounded-full ${dbHealth.connected ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
+                  <span className="text-slate-400">Target Neon DB:</span>
+                  <span className="font-mono text-emerald-400 font-semibold">{dbHealth.database || 'neondb'}</span>
+                </div>
+                <span className="font-mono text-[11px] text-slate-500 truncate max-w-[200px]">{dbHealth.host}</span>
+              </div>
+
+              {/* Dump File Metadata Card */}
+              <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between font-mono text-xs">
+                  <div className="flex items-center gap-2 truncate">
+                    <FileCode className="w-4 h-4 text-cyan-400 shrink-0" />
+                    <span className="font-semibold text-slate-100 truncate">{dumpFileMeta.name}</span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-slate-400 px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-[11px]">
+                      {dumpFileMeta.size}
+                    </span>
+                    <span className="text-emerald-400 px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/30 text-[10px] font-mono font-semibold">
+                      psql Native
+                    </span>
+                  </div>
+                </div>
+
+                <div className="text-[11px] font-mono text-slate-400 pt-1 border-t border-slate-800/80 flex items-center justify-between">
+                  <span className="text-slate-500 text-[10px] uppercase">Execution Mode:</span>
+                  <span className="text-cyan-300 font-semibold">Zero-Heap Streaming (OOM Safe)</span>
+                </div>
+
+                {/* Local file path option for instant zero-upload speed */}
+                <div className="pt-2 border-t border-slate-800/80">
+                  <label className="block text-[10px] uppercase tracking-wider text-slate-400 font-mono mb-1">
+                    Local Path (Optional - skip HTTP upload for instant execution):
+                  </label>
+                  <input
+                    type="text"
+                    value={localDumpPathInput}
+                    onChange={(e) => setLocalDumpPathInput(e.target.value)}
+                    placeholder="e.g. C:\Users\Srishika\Downloads\dump-production-202611121626.sql"
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 font-mono focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
+
+                {/* Code Preview */}
+                <div>
+                  <span className="text-[10px] uppercase tracking-wider text-slate-500 font-mono block mb-1">
+                    Dump File Preview (First 15 lines):
+                  </span>
+                  <pre className="bg-slate-900/90 rounded-lg p-2.5 font-mono text-[11px] text-slate-300 border border-slate-800 overflow-x-auto max-h-28 text-left leading-relaxed">
+                    {dumpFileMeta.preview}
+                  </pre>
+                </div>
+              </div>
+
+              {/* Execution Status / Alerts */}
+              {isPopulatingDb ? (
+                <div className="p-3.5 rounded-xl bg-indigo-950/40 border border-indigo-500/30 flex items-center gap-3 text-xs text-indigo-200">
+                  <Loader2 className="w-5 h-5 animate-spin text-cyan-400 shrink-0" />
+                  <div>
+                    <div className="font-semibold text-white">Populating Database...</div>
+                    <div className="text-[11px] text-slate-300">
+                      Executing SQL dump via native PostgreSQL engine against Neon DB. Processing types, tables, and rows...
+                    </div>
+                  </div>
+                </div>
+              ) : dumpResultStatus?.success ? (
+                <div className="p-3.5 rounded-xl bg-emerald-950/40 border border-emerald-500/30 space-y-1.5 text-xs text-emerald-200">
+                  <div className="flex items-center gap-2 font-semibold text-emerald-300">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>Database Successfully Populated!</span>
+                  </div>
+                  <div className="text-[11px] text-slate-300 font-mono">
+                    Loaded {dumpResultStatus.tablesCount || dbHealth.tables?.length || 0} tables into Neon DB in {dumpResultStatus.durationMs ? `${(dumpResultStatus.durationMs / 1000).toFixed(1)}s` : 'completed'}.
+                  </div>
+                </div>
+              ) : dumpResultStatus?.success === false ? (
+                <div className="p-3.5 rounded-xl bg-rose-950/40 border border-rose-500/30 space-y-1.5 text-xs text-rose-200">
+                  <div className="flex items-center gap-2 font-semibold text-rose-300">
+                    <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                    <span>Dump Execution Failed</span>
+                  </div>
+                  <div className="text-[11px] text-rose-300 font-mono whitespace-pre-wrap bg-slate-950 p-2 rounded border border-rose-900/40">
+                    {dumpResultStatus.message}
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Action Buttons */}
+              <div className="pt-2 flex items-center justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsDumpModalOpen(false);
+                    setDumpFileMeta(null);
+                    setSelectedDumpFile(null);
+                    setDumpResultStatus(null);
+                  }}
+                  disabled={isPopulatingDb}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold transition-colors disabled:opacity-40"
+                >
+                  {dumpResultStatus?.success ? 'Close' : 'Cancel'}
+                </button>
+
+                {!dumpResultStatus?.success ? (
+                  <button
+                    type="button"
+                    onClick={handlePopulateDatabaseWithDump}
+                    disabled={isPopulatingDb || !dbHealth.connected}
+                    className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold text-xs shadow-md transition-all active:scale-95 disabled:opacity-40"
+                  >
+                    {isPopulatingDb ? (
+                      <Loader2 className="w-4 h-4 animate-spin text-white" />
+                    ) : (
+                      <Play className="w-4 h-4 fill-current text-white" />
+                    )}
+                    <span>{isPopulatingDb ? 'Populating Neon DB...' : 'Populate Database'}</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsDumpModalOpen(false);
+                      setDumpFileMeta(null);
+                      setSelectedDumpFile(null);
+                      setDumpResultStatus(null);
+                    }}
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs shadow-md transition-all active:scale-95"
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>Done & Explore Tables</span>
+                  </button>
+                )}
+              </div>
+
+            </div>
           </div>
         </div>
       )}

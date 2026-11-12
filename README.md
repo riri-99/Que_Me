@@ -35,6 +35,12 @@
 
 ---
 
+## Neon Database Integration
+
+For details on connecting to Neon PostgreSQL, dumping production data, and executing queries directly in-studio, see the [Neon Integration Plan](file:///C:/que_me/NEON_INTEGRATION_PLAN.md).
+
+---
+
 ## Getting Started
 
 1. Navigate to the project directory:

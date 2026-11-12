@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Cormorant_Garamond, DM_Sans, Fira_Code } from "next/font/google";
 import "./globals.css";
 
@@ -22,6 +22,13 @@ const firaCode = Fira_Code({
 export const metadata: Metadata = {
   title: "Que_Me — SQL Query & Diagnostic Studio",
   description: "Investigation and SQL query generation dashboard for TradingAccount operations and database diagnostics",
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 5,
+  themeColor: "#020617",
 };
 
 export default function RootLayout({
