@@ -47,7 +47,8 @@ import {
   Cloud,
   Upload,
   FileCode,
-  Lock
+  Lock,
+  RefreshCw
 } from 'lucide-react';
 import { 
   QUERY_TEMPLATES, 
@@ -98,7 +99,7 @@ export default function DashboardPage() {
   const [savedCustomScripts, setSavedCustomScripts] = useState<UserCustomScript[]>([]);
 
   // SQL Editor States
-  const [editorSql, setEditorSql] = useState<string>('-- Write the query here\n');
+  const [editorSql, setEditorSql] = useState<string>('BEGIN;\n\n-- Write the query here\n\nROLLBACK;\n');
   const [isCustomEdited, setIsCustomEdited] = useState<boolean>(false);
   const [viewMode, setViewMode] = useState<'editor' | 'preview'>('editor');
 
@@ -106,7 +107,7 @@ export default function DashboardPage() {
   const [tableSearchQuery, setTableSearchQuery] = useState<string>('');
   const [selectedTable, setSelectedTable] = useState<string | null>(null);
 
-  // Dump SQL File States (Populate Neon DB directly from .sql file - Zero-Memory OOM Safe)
+  // Dump SQL File States (Populate DB directly from .sql file - Zero-Memory OOM Safe)
   const dumpFileInputRef = useRef<HTMLInputElement>(null);
   const [isDumpModalOpen, setIsDumpModalOpen] = useState<boolean>(false);
   const [selectedDumpFile, setSelectedDumpFile] = useState<File | null>(null);
@@ -127,12 +128,14 @@ export default function DashboardPage() {
     output?: string;
   } | null>(null);
 
-  // Neon DB Connection States
+  // PostgreSQL Database Connection States
+  const [activeConnUrl, setActiveConnUrl] = useState<string>('');
   const [dbHealth, setDbHealth] = useState<{
     connected: boolean;
     database?: string;
     version?: string;
     host?: string;
+    provider?: string;
     maskedUrl?: string;
     latencyMs?: number;
     tables?: Array<{ name: string; count: string }>;
@@ -142,6 +145,13 @@ export default function DashboardPage() {
   const [isConnModalOpen, setIsConnModalOpen] = useState<boolean>(false);
   const [inputConnUrl, setInputConnUrl] = useState<string>('');
   const [showPassword, setShowPassword] = useState<boolean>(false);
+  const [savedDatabases, setSavedDatabases] = useState<Array<{
+    id: string;
+    name: string;
+    url: string;
+    provider: string;
+    lastConnected: string;
+  }>>([]);
   const [connTestStatus, setConnTestStatus] = useState<{
     testing: boolean;
     success?: boolean;
@@ -221,6 +231,30 @@ export default function DashboardPage() {
       console.error('Failed to load custom scripts from localStorage', err);
     }
 
+    // Load saved database connection string for serverless (Vercel) persistence
+    try {
+      const savedConn = localStorage.getItem('que_me_db_connection_url');
+      if (savedConn && savedConn.trim()) {
+        setActiveConnUrl(savedConn.trim());
+        setInputConnUrl(savedConn.trim());
+      }
+    } catch {
+      // ignore
+    }
+
+    // Load recent / saved database connections for quick switching directly on web
+    try {
+      const storedDbs = localStorage.getItem('que_me_saved_databases');
+      if (storedDbs) {
+        const parsed = JSON.parse(storedDbs);
+        if (Array.isArray(parsed)) {
+          setSavedDatabases(parsed);
+        }
+      }
+    } catch {
+      // ignore
+    }
+
     const now = new Date();
     const todayStr = now.toISOString().split('T')[0];
     const last7DaysStr = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
@@ -243,20 +277,6 @@ export default function DashboardPage() {
     if (params.get('mode') === 'injected') setParameterized(false);
   }, []);
 
-  // Update URL whenever relevant parameters change
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const params = new URLSearchParams();
-    if (loginId) params.set('login', loginId);
-    if (activeCaseId) params.set('case', activeCaseId);
-    params.set('dateMode', dateMode);
-    if (startDate) params.set('from', startDate);
-    if (dateMode === 'range' && endDate) params.set('to', endDate);
-    params.set('mode', parameterized ? 'param' : 'injected');
-
-    const newUrl = `${window.location.pathname}?${params.toString()}`;
-    window.history.replaceState({}, '', newUrl);
-  }, [loginId, activeCaseId, dateMode, startDate, endDate, parameterized]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -281,6 +301,19 @@ export default function DashboardPage() {
     return QUERY_TEMPLATES.find((t) => t.id === activeCaseId) || null;
   }, [activeCaseId, activeUserScript]);
 
+  // Helper to ensure every query has editable BEGIN; and ROLLBACK;
+  const wrapWithTransaction = (sqlText: string): string => {
+    const trimmed = (sqlText || '').trim();
+    if (!trimmed || trimmed === '-- Write the query here') {
+      return 'BEGIN;\n\n-- Write the query here\n\nROLLBACK;\n';
+    }
+    const upper = trimmed.toUpperCase();
+    if (upper.startsWith('BEGIN;') && upper.includes('ROLLBACK;')) {
+      return `${trimmed}\n`;
+    }
+    return `BEGIN;\n\n${trimmed}\n\nROLLBACK;\n`;
+  };
+
   const { generatedSql, currentMetadata } = useMemo(() => {
     if (activeUserScript) {
       let sql = activeUserScript.sql;
@@ -288,7 +321,7 @@ export default function DashboardPage() {
         sql = sql.replace(/:loginId\b/g, loginId);
       }
       return {
-        generatedSql: sql,
+        generatedSql: wrapWithTransaction(sql),
         currentMetadata: {
           title: activeUserScript.title,
           description: activeUserScript.description,
@@ -305,7 +338,7 @@ export default function DashboardPage() {
     }
 
     if (!activeTemplate) {
-      return { generatedSql: '-- Write the query here\n', currentMetadata: null };
+      return { generatedSql: 'BEGIN;\n\n-- Write the query here\n\nROLLBACK;\n', currentMetadata: null };
     }
 
     const sql = activeTemplate.generateSql({
@@ -317,7 +350,7 @@ export default function DashboardPage() {
     });
 
     return {
-      generatedSql: sql,
+      generatedSql: wrapWithTransaction(sql),
       currentMetadata: {
         title: activeTemplate.title,
         description: activeTemplate.description,
@@ -347,11 +380,13 @@ export default function DashboardPage() {
     }
   };
 
-  // Check Neon DB health on load
-  const fetchDbHealth = async () => {
+  // Check Database health on load (supports local env or client-persisted connection for Vercel)
+  const fetchDbHealth = async (overrideUrl?: string) => {
     setIsCheckingHealth(true);
+    const connToTest = overrideUrl || activeConnUrl || (typeof window !== 'undefined' ? localStorage.getItem('que_me_db_connection_url') : null) || undefined;
     try {
-      const res = await fetch('/api/db/health');
+      const url = connToTest ? `/api/db/health?testConn=${encodeURIComponent(connToTest)}` : '/api/db/health';
+      const res = await fetch(url);
       const data = await res.json();
       setDbHealth(data);
       if (data.maskedUrl && !inputConnUrl) {
@@ -365,7 +400,8 @@ export default function DashboardPage() {
   };
 
   useEffect(() => {
-    fetchDbHealth();
+    const saved = typeof window !== 'undefined' ? localStorage.getItem('que_me_db_connection_url') : null;
+    fetchDbHealth(saved || undefined);
   }, []);
 
   const startExecTimer = () => {
@@ -384,22 +420,20 @@ export default function DashboardPage() {
     }
   };
 
-  // Run SQL Query
+  // Run SQL Query (User has full editable control over BEGIN; ... ROLLBACK; transaction block)
   const handleExecuteQuery = async () => {
     if (isExecuting) return;
     const userSql = (editorSql || generatedSql || '').trim();
-    if (!userSql || userSql === '-- Write the query here') return;
+    if (!userSql || userSql === '-- Write the query here' || userSql === 'BEGIN;\n\n-- Write the query here\n\nROLLBACK;') return;
 
     if (!dbHealth.connected) {
       setIsConnModalOpen(true);
       return;
     }
 
-    // Wrapped in non-editable transaction block BEGIN; ... ROLLBACK;
-    const sqlToRun =
-      userSql.toUpperCase().startsWith('BEGIN;') && userSql.toUpperCase().includes('ROLLBACK;')
-        ? userSql
-        : `BEGIN;\n${userSql}\nROLLBACK;`;
+    // Pass query directly as edited by the user
+    const sqlToRun = userSql;
+    const connToSend = activeConnUrl || (typeof window !== 'undefined' ? localStorage.getItem('que_me_db_connection_url') : null) || undefined;
 
     setIsExecuting(true);
     startExecTimer();
@@ -408,7 +442,10 @@ export default function DashboardPage() {
       const res = await fetch('/api/query/execute', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sql: sqlToRun })
+        body: JSON.stringify({
+          sql: sqlToRun,
+          connectionString: connToSend
+        })
       });
       const data = await res.json();
       setQueryResult({
@@ -430,10 +467,10 @@ export default function DashboardPage() {
     }
   };
 
-  // Table selection from Explorer -> Write query in editor
+  // Table selection from Explorer -> Write query in editor with editable BEGIN; and ROLLBACK;
   const handleSelectTable = (tableName: string) => {
     setSelectedTable(tableName);
-    const sql = `SELECT * FROM "${tableName}" LIMIT 50;`;
+    const sql = `BEGIN;\n\nSELECT * FROM "${tableName}" LIMIT 50;\n\nROLLBACK;\n`;
     setEditorSql(sql);
     setIsCustomEdited(true);
   };
@@ -502,6 +539,10 @@ export default function DashboardPage() {
       }
       if (localDumpPathInput.trim()) {
         formData.append('localFilePath', localDumpPathInput.trim());
+      }
+      const connToSend = activeConnUrl || (typeof window !== 'undefined' ? localStorage.getItem('que_me_db_connection_url') : null) || undefined;
+      if (connToSend) {
+        formData.append('connectionString', connToSend);
       }
 
       const res = await fetch('/api/query/execute', {
@@ -594,17 +635,41 @@ export default function DashboardPage() {
       });
       const data = await res.json();
       if (data.success) {
+        const savedUrl = inputConnUrl.trim();
+        setActiveConnUrl(savedUrl);
+        try {
+          localStorage.setItem('que_me_db_connection_url', savedUrl);
+        } catch {
+          // ignore
+        }
+        const newDbEntry = {
+          id: String(Date.now()),
+          name: data.database || 'PostgreSQL DB',
+          url: savedUrl,
+          provider: data.provider || 'PostgreSQL',
+          lastConnected: new Date().toLocaleDateString()
+        };
+        setSavedDatabases((prev) => {
+          const filtered = prev.filter((d) => d.url !== savedUrl);
+          const updated = [newDbEntry, ...filtered].slice(0, 10);
+          try {
+            localStorage.setItem('que_me_saved_databases', JSON.stringify(updated));
+          } catch {}
+          return updated;
+        });
+
         setDbHealth({
           connected: true,
           database: data.database,
           version: data.version,
           host: data.host,
+          provider: data.provider,
           maskedUrl: data.maskedUrl,
           latencyMs: data.latencyMs,
           tables: data.tables || []
         });
         setIsConnModalOpen(false);
-        setScriptSaveToast('Neon database connected successfully!');
+        setScriptSaveToast(`Connected to "${data.database}"! Loaded ${data.tables?.length || 0} tables.`);
         setTimeout(() => setScriptSaveToast(''), 3000);
       } else {
         setConnTestStatus({
@@ -624,15 +689,100 @@ export default function DashboardPage() {
     }
   };
 
+  const handleSwitchDatabase = async (targetUrl: string) => {
+    if (!targetUrl.trim() || isSavingConn) return;
+    setInputConnUrl(targetUrl.trim());
+    setIsSavingConn(true);
+    setConnTestStatus({ testing: true, message: 'Switching active database...' });
+    try {
+      const res = await fetch('/api/db/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ connectionString: targetUrl.trim() })
+      });
+      const data = await res.json();
+      if (data.success) {
+        const savedUrl = targetUrl.trim();
+        setActiveConnUrl(savedUrl);
+        try {
+          localStorage.setItem('que_me_db_connection_url', savedUrl);
+        } catch {}
+
+        const newDbEntry = {
+          id: String(Date.now()),
+          name: data.database || 'PostgreSQL DB',
+          url: savedUrl,
+          provider: data.provider || 'PostgreSQL',
+          lastConnected: new Date().toLocaleDateString()
+        };
+        setSavedDatabases((prev) => {
+          const filtered = prev.filter((d) => d.url !== savedUrl);
+          const updated = [newDbEntry, ...filtered].slice(0, 10);
+          try {
+            localStorage.setItem('que_me_saved_databases', JSON.stringify(updated));
+          } catch {}
+          return updated;
+        });
+
+        setDbHealth({
+          connected: true,
+          database: data.database,
+          version: data.version,
+          host: data.host,
+          provider: data.provider,
+          maskedUrl: data.maskedUrl,
+          latencyMs: data.latencyMs,
+          tables: data.tables || []
+        });
+        setSelectedTable(null);
+        setQueryResult(null);
+        setIsConnModalOpen(false);
+        setScriptSaveToast(`Switched to "${data.database}"! Loaded ${data.tables?.length || 0} tables.`);
+        setTimeout(() => setScriptSaveToast(''), 3000);
+      } else {
+        setConnTestStatus({
+          testing: false,
+          success: false,
+          message: data.error || 'Could not switch to selected database.'
+        });
+      }
+    } catch (err: any) {
+      setConnTestStatus({
+        testing: false,
+        success: false,
+        message: err.message || 'Failed to switch database.'
+      });
+    } finally {
+      setIsSavingConn(false);
+    }
+  };
+
+  const handleRemoveSavedDb = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    setSavedDatabases((prev) => {
+      const updated = prev.filter((d) => d.id !== id);
+      try {
+        localStorage.setItem('que_me_saved_databases', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+  };
+
   const handleDisconnect = async () => {
     try {
+      setActiveConnUrl('');
+      try {
+        localStorage.removeItem('que_me_db_connection_url');
+      } catch {
+        // ignore
+      }
       await fetch('/api/db/config', { method: 'DELETE' });
       setDbHealth({ connected: false, tables: [] });
       setSelectedTable(null);
       setInputConnUrl('');
       setConnTestStatus({ testing: false });
       setIsConnModalOpen(false);
-      setScriptSaveToast('Disconnected from Neon database.');
+      setScriptSaveToast('Disconnected from PostgreSQL database.');
       setTimeout(() => setScriptSaveToast(''), 3000);
     } catch (err) {
       console.error(err);
@@ -987,22 +1137,16 @@ LIMIT 50;`;
   // -------------------------------------------------------------
   const handleCopySql = async () => {
     const userSql = (editorSql || generatedSql || '').trim();
-    const fullSql = userSql.toUpperCase().startsWith('BEGIN;') && userSql.toUpperCase().includes('ROLLBACK;')
-      ? userSql
-      : `BEGIN;\n  ${userSql.split('\n').join('\n  ')}\nROLLBACK;\n`;
-    await navigator.clipboard.writeText(fullSql);
+    await navigator.clipboard.writeText(userSql);
     setCopiedSql(true);
     setTimeout(() => setCopiedSql(false), 2000);
   };
 
   const handleDownloadSql = () => {
     const userSql = (editorSql || generatedSql || '').trim();
-    const fullSql = userSql.toUpperCase().startsWith('BEGIN;') && userSql.toUpperCase().includes('ROLLBACK;')
-      ? userSql
-      : `BEGIN;\n  ${userSql.split('\n').join('\n  ')}\nROLLBACK;\n`;
     const caseName = activeCaseId || 'custom_query';
     const filename = `Que_Me_${caseName}_${Date.now()}.sql`;
-    const blob = new Blob([fullSql], { type: 'text/sql;charset=utf-8;' });
+    const blob = new Blob([userSql], { type: 'text/sql;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -1026,7 +1170,7 @@ LIMIT 50;`;
     setStartDate(last7DaysStr);
     setEndDate(todayStr);
     setActiveCaseId('');
-    setEditorSql('-- Write the query here\n');
+    setEditorSql('BEGIN;\n\n-- Write the query here\n\nROLLBACK;\n');
     setSearchReason('');
     setParameterized(false);
     setIsDropdownOpen(false);
@@ -1093,7 +1237,7 @@ LIMIT 50;`;
               </div>
             </div>
 
-            {/* Neon DB Connection Pill */}
+            {/* PostgreSQL DB Connection Pill & Direct Web Switcher */}
             <button
               type="button"
               onClick={() => setIsConnModalOpen(true)}
@@ -1104,7 +1248,7 @@ LIMIT 50;`;
                   ? 'bg-emerald-950/40 border-emerald-500/30 text-emerald-400 hover:border-emerald-400 hover:bg-emerald-950/60'
                   : 'bg-rose-950/30 border-rose-500/30 text-rose-300 hover:border-rose-400 hover:bg-rose-950/50'
               }`}
-              title="Click to manage Neon database connection"
+              title="Change database URL"
             >
               <div className="flex items-center gap-1.5">
                 <span className={`w-2 h-2 rounded-full ${
@@ -1118,18 +1262,16 @@ LIMIT 50;`;
               </div>
               <div className="flex items-center gap-1.5 text-left">
                 <span className="font-semibold text-[11px] sm:text-xs">
-                  {isCheckingHealth ? 'Checking...' : dbHealth.connected ? (dbHealth.database || 'Neon DB') : 'No DB'}
+                  {isCheckingHealth ? 'Checking...' : dbHealth.connected ? (dbHealth.provider ? `${dbHealth.provider.replace(' PostgreSQL', '')}: ${dbHealth.database}` : (dbHealth.database || 'PostgreSQL')) : 'No DB Connected'}
                 </span>
                 {dbHealth.connected && dbHealth.latencyMs !== undefined && (
                   <span className="text-[10px] text-emerald-500/80 hidden md:inline">
                     • {dbHealth.latencyMs}ms
                   </span>
                 )}
-                {!dbHealth.connected && (
-                  <span className="text-[10px] text-rose-400/80 hidden sm:inline underline decoration-dotted">
-                    (Connect)
-                  </span>
-                )}
+                <span className="text-[10px] font-sans px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 group-hover:bg-indigo-500/30 transition-colors ml-1">
+                  Change DB
+                </span>
               </div>
             </button>
           </div>
@@ -1393,7 +1535,7 @@ LIMIT 50;`;
                     }}
                     disabled={isPopulatingDb}
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-cyan-600 hover:from-indigo-500 hover:to-cyan-500 text-white text-xs font-semibold shadow-md shadow-indigo-950/40 transition-all active:scale-95 disabled:opacity-50"
-                    title="Upload and execute a .sql dump file to populate Neon DB"
+                    title="Upload and execute a .sql dump file to populate PostgreSQL database"
                   >
                     {isPopulatingDb ? (
                       <Loader2 className="w-3.5 h-3.5 animate-spin text-white" />
@@ -1490,7 +1632,7 @@ LIMIT 50;`;
                         No Tables Loaded
                       </h4>
                       <p className="text-xs text-slate-400 leading-relaxed max-w-xs mb-4">
-                        Database tables are fetched dynamically from Neon DB. Connect your restored production database to explore tables.
+                        Database tables are fetched dynamically from your connected PostgreSQL database. Connect any database (Neon, Supabase, RDS, Localhost) to explore tables.
                       </p>
                       <button
                         type="button"
@@ -1498,7 +1640,7 @@ LIMIT 50;`;
                         className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold text-xs shadow-md transition-all active:scale-95"
                       >
                         <Database className="w-4 h-4" />
-                        <span>Connect Neon Database</span>
+                        <span>Connect PostgreSQL Database</span>
                       </button>
                     </div>
                   ) : (
@@ -1666,21 +1808,11 @@ LIMIT 50;`;
                 </div>
               </div>
 
-              {/* Editor / Preview Body with Non-Editable BEGIN; and ROLLBACK; */}
+              {/* Editor / Preview Body with Fully Editable BEGIN; and ROLLBACK; */}
               <div className="flex flex-col bg-slate-950 overflow-hidden">
-                {/* Fixed Non-Editable Header Line: BEGIN; */}
-                <div className="flex items-center px-3 py-1.5 bg-slate-950 border-b border-slate-800/80 font-mono text-xs sm:text-[13px] select-none shrink-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-slate-600 text-right font-mono" style={{ minWidth: '32px' }}>
-                      1
-                    </span>
-                    <span className="text-purple-400 font-bold tracking-wide">BEGIN;</span>
-                  </div>
-                </div>
-
                 {/* Middle Editable / Preview Query Area (Expanded Vertical Height) */}
                 {viewMode === 'editor' ? (
-                  <div className="flex relative bg-slate-950 h-[280px] sm:h-[320px] overflow-hidden">
+                  <div className="flex relative bg-slate-950 h-[480px] sm:h-[560px] lg:h-[620px] overflow-hidden">
                     {/* Line Numbers Gutter */}
                     <div
                       ref={lineNumbersRef}
@@ -1689,7 +1821,7 @@ LIMIT 50;`;
                     >
                       {editorSql.split('\n').map((_, idx) => (
                         <div key={idx} className="h-[22px]">
-                          {idx + 2}
+                          {idx + 1}
                         </div>
                       ))}
                     </div>
@@ -1712,12 +1844,12 @@ LIMIT 50;`;
                     />
                   </div>
                 ) : (
-                  <div className="relative bg-slate-950 p-2 font-mono text-xs sm:text-[13px] leading-relaxed overflow-auto custom-scrollbar h-[280px] sm:h-[320px] text-slate-100 selection:bg-indigo-600 selection:text-white">
+                  <div className="relative bg-slate-950 p-2 font-mono text-xs sm:text-[13px] leading-relaxed overflow-auto custom-scrollbar h-[480px] sm:h-[560px] lg:h-[620px] text-slate-100 selection:bg-indigo-600 selection:text-white">
                     <pre className="whitespace-pre">
-                      {(editorSql || '-- Write the query here').split('\n').map((line, idx) => (
+                      {(editorSql || 'BEGIN;\n\n-- Write the query here\n\nROLLBACK;\n').split('\n').map((line, idx) => (
                         <div key={idx} className="table-row">
                           <span className="table-cell select-none text-slate-600 pr-3 text-right text-xs" style={{ minWidth: '38px' }}>
-                            {idx + 2}
+                            {idx + 1}
                           </span>
                           <span className="table-cell">
                             {formatSqlLine(line)}
@@ -1727,22 +1859,12 @@ LIMIT 50;`;
                     </pre>
                   </div>
                 )}
-
-                {/* Fixed Non-Editable Footer Line: ROLLBACK; */}
-                <div className="flex items-center px-3 py-1.5 bg-slate-950 border-t border-slate-800/80 font-mono text-xs sm:text-[13px] select-none shrink-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-slate-600 text-right font-mono" style={{ minWidth: '32px' }}>
-                      {editorSql.split('\n').length + 2}
-                    </span>
-                    <span className="text-rose-400 font-bold tracking-wide">ROLLBACK;</span>
-                  </div>
-                </div>
               </div>
 
               {/* Editor Sub-Status Bar */}
               <div className="border-t border-slate-800/80 bg-slate-950 px-3.5 py-1.5 flex items-center justify-between text-[10px] sm:text-[11px] text-slate-500 font-mono">
                 <div className="flex items-center gap-2.5">
-                  <span>{editorSql.split('\n').length + 2} lines</span>
+                  <span>{editorSql.split('\n').length} lines</span>
                   <span>•</span>
                   <span>{editorSql.length} chars</span>
                 </div>
@@ -1895,7 +2017,7 @@ LIMIT 50;`;
                       <Loader2 className="w-7 h-7 animate-spin" />
                     </div>
                     <h4 className="text-base font-bold text-white font-heading mb-1">
-                      Executing Query Against Neon DB...
+                      Executing Query ...
                     </h4>
                     <p className="text-xs text-slate-400 max-w-sm mb-3">
                       Streaming uncapped result rows from your restored database.
@@ -1912,10 +2034,10 @@ LIMIT 50;`;
                       <WifiOff className="w-7 h-7" />
                     </div>
                     <h4 className="text-base font-bold text-white font-heading mb-1.5">
-                      Neon Database Not Connected
+                      PostgreSQL Database Not Connected
                     </h4>
                     <p className="text-xs text-slate-400 leading-relaxed mb-4">
-                      Connect your Neon PostgreSQL database holding your production dump to execute queries and view live results directly in Que_Me.
+                      Connect your Database.
                     </p>
                     <button
                       type="button"
@@ -1923,7 +2045,7 @@ LIMIT 50;`;
                       className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold text-xs shadow-md transition-all active:scale-95"
                     >
                       <Database className="w-4 h-4" />
-                      <span>Connect Neon Database</span>
+                      <span>Connect PostgreSQL Database</span>
                     </button>
                   </div>
                 ) : !queryResult ? (
@@ -2204,12 +2326,12 @@ LIMIT 50;`;
                   <div className="flex items-center gap-2">
                     <span className="text-slate-400">Status: Idle</span>
                     <span>•</span>
-                    <span>Connected to Neon PostgreSQL</span>
+                    <span>Connected to {dbHealth.provider || 'PostgreSQL'}</span>
                   </div>
                 )}
                 <div className="flex items-center gap-1.5 shrink-0 ml-auto sm:ml-0">
                   <span className={`w-2 h-2 rounded-full ${dbHealth.connected ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`} />
-                  <span className="text-slate-400">{dbHealth.connected ? (dbHealth.host || 'Neon Connected') : 'Disconnected'}</span>
+                  <span className="text-slate-400">{dbHealth.connected ? (dbHealth.host || 'Connected') : 'Disconnected'}</span>
                 </div>
               </div>
 
@@ -2337,11 +2459,8 @@ LIMIT 50;`;
                 </div>
                 <div>
                   <h3 className="text-base font-bold text-white font-heading">
-                    Neon Database Connection
+                    Database Connection Hub
                   </h3>
-                  <p className="text-xs text-slate-400">
-                    Connect your Neon PostgreSQL instance
-                  </p>
                 </div>
               </div>
               <button
@@ -2361,7 +2480,7 @@ LIMIT 50;`;
                     <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
                     <div>
                       <div className="font-semibold text-emerald-300 font-mono">
-                        Connected to: {dbHealth.database}
+                        Active DB: {dbHealth.database} ({dbHealth.provider || 'PostgreSQL'})
                       </div>
                       <div className="text-[11px] text-slate-400 font-mono truncate max-w-xs">
                         {dbHealth.host} • {dbHealth.version} ({dbHealth.latencyMs}ms)
@@ -2378,18 +2497,99 @@ LIMIT 50;`;
                 </div>
               )}
 
-              {/* Connection String Input */}
+              {/* Saved Databases / Quick Switcher (1-Click Switch) */}
+              {savedDatabases.length > 0 && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-xs font-semibold uppercase tracking-wider text-slate-300">
+                    <span className="flex items-center gap-1.5 font-mono">
+                      <Layers className="w-3.5 h-3.5 text-indigo-400" />
+                      Saved Databases
+                    </span>
+                    
+                  </div>
+                  <div className="grid grid-cols-1 gap-2 max-h-40 overflow-y-auto custom-scrollbar pr-1">
+                    {savedDatabases.map((sdb) => {
+                      const isActive = dbHealth.connected && (activeConnUrl === sdb.url || dbHealth.database === sdb.name);
+                      return (
+                        <div
+                          key={sdb.id}
+                          onClick={() => !isActive && handleSwitchDatabase(sdb.url)}
+                          className={`p-2.5 rounded-xl border flex items-center justify-between gap-2.5 transition-all text-xs ${
+                            isActive
+                              ? 'bg-emerald-950/40 border-emerald-500/40 cursor-default'
+                              : 'bg-slate-950/70 border-slate-800 hover:border-indigo-500/50 hover:bg-slate-900 cursor-pointer group'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <div className={`p-1.5 rounded-lg shrink-0 ${
+                              isActive ? 'bg-emerald-600/20 text-emerald-400' : 'bg-slate-900 text-slate-400 group-hover:text-indigo-400'
+                            }`}>
+                              <Database className="w-3.5 h-3.5" />
+                            </div>
+                            <div className="min-w-0">
+                              <div className="font-semibold text-white font-mono flex items-center gap-1.5 truncate">
+                                <span>{sdb.name}</span>
+                                <span className="text-[10px] font-sans px-1.5 py-0.2 rounded bg-slate-800 text-slate-400">
+                                  {sdb.provider}
+                                </span>
+                              </div>
+                              <div className="text-[10px] text-slate-500 font-mono truncate">
+                                {sdb.url.replace(/:([^@]+)@/, ':••••••@')}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            {isActive ? (
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/30">
+                                Active ✓
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleSwitchDatabase(sdb.url);
+                                }}
+                                disabled={isSavingConn}
+                                className="text-[10px] font-mono px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold shadow-sm transition-colors"
+                              >
+                                Switch DB
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={(e) => handleRemoveSavedDb(e, sdb.id)}
+                              className="p-1 rounded text-slate-500 hover:text-rose-400 hover:bg-slate-800 transition-colors"
+                              title="Remove from saved databases list"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Connection String Input (Change Database) */}
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5">
-                  Neon Connection String (DATABASE_URL) *
-                </label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-semibold uppercase tracking-wider text-slate-300">
+                    Database Connection String
+                  </label>
+                  {/* Provider Quick Templates */}
+                  <div className="flex items-center gap-1.5 text-[10px] font-mono">
+                    
+                  </div>
+                </div>
                 <div className="relative">
                   <input
                     type={showPassword ? 'text' : 'password'}
                     required
                     value={inputConnUrl}
                     onChange={(e) => setInputConnUrl(e.target.value)}
-                    placeholder="postgresql://user:password@ep-xyz-pooler.region.aws.neon.tech/neondb?sslmode=require"
+                    placeholder="postgresql://user:password@host:5432/dbname?sslmode=require"
                     className="w-full bg-slate-950 border border-slate-700 rounded-xl pl-3.5 pr-10 py-2.5 text-xs sm:text-sm text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 font-mono"
                   />
                   <button
@@ -2401,16 +2601,14 @@ LIMIT 50;`;
                     {showPassword ? <Eye className="w-4 h-4" /> : <Eye className="w-4 h-4 opacity-50" />}
                   </button>
                 </div>
-                <p className="text-[11px] text-slate-500 mt-1 font-mono">
-                  Recommended: Use the pooled connection string (<span className="text-slate-400">-pooler</span>) from Neon console.
-                </p>
+                
               </div>
 
               {/* Test Status Feedback Alert */}
               {connTestStatus.testing ? (
                 <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center gap-2.5 text-xs text-slate-300 font-mono">
                   <Loader2 className="w-4 h-4 animate-spin text-emerald-400" />
-                  <span>Testing connection to Neon PostgreSQL...</span>
+                  <span>{connTestStatus.message || 'Testing connection to PostgreSQL database...'}</span>
                 </div>
               ) : connTestStatus.message ? (
                 <div
@@ -2429,19 +2627,7 @@ LIMIT 50;`;
                 </div>
               ) : null}
 
-              {/* Quick Guide on where to find credentials */}
-              <div className="bg-slate-950/60 border border-slate-800/80 rounded-xl p-3.5 text-xs space-y-1.5 text-slate-400">
-                <div className="font-semibold text-slate-200 flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wide">
-                  <Info className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>Where to find this in Neon</span>
-                </div>
-                <ol className="list-decimal list-inside space-y-1 text-[11px] leading-relaxed">
-                  <li>Log into <a href="https://console.neon.tech" target="_blank" rel="noreferrer" className="text-indigo-400 underline hover:text-indigo-300">console.neon.tech</a> and select your project.</li>
-                  <li>On the Dashboard, find the <strong>Connection Details</strong> widget.</li>
-                  <li>Select <strong>Pooled connection</strong> and copy the connection string.</li>
-                  <li>Paste it above, click <strong>Test Connection</strong>, then <strong>Save & Connect</strong>.</li>
-                </ol>
-              </div>
+             
 
               {/* Action Buttons */}
               <div className="pt-2 flex items-center justify-between gap-3">
@@ -2469,7 +2655,7 @@ LIMIT 50;`;
                     className="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-40 text-white font-semibold text-xs shadow-md transition-all active:scale-95 flex items-center gap-1.5"
                   >
                     {isSavingConn ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
-                    <span>{isSavingConn ? 'Connecting...' : 'Save & Connect'}</span>
+                    <span>{isSavingConn ? 'Connecting...' : dbHealth.connected ? 'Switch & Connect Database' : 'Connect Database'}</span>
                   </button>
                 </div>
               </div>
@@ -2521,8 +2707,8 @@ LIMIT 50;`;
               <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   <span className={`w-2 h-2 rounded-full ${dbHealth.connected ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
-                  <span className="text-slate-400">Target Neon DB:</span>
-                  <span className="font-mono text-emerald-400 font-semibold">{dbHealth.database || 'neondb'}</span>
+                  <span className="text-slate-400">Target Database:</span>
+                  <span className="font-mono text-emerald-400 font-semibold">{dbHealth.database || 'postgres'} ({dbHealth.provider || 'PostgreSQL'})</span>
                 </div>
                 <span className="font-mono text-[11px] text-slate-500 truncate max-w-[200px]">{dbHealth.host}</span>
               </div>
@@ -2581,7 +2767,7 @@ LIMIT 50;`;
                   <div>
                     <div className="font-semibold text-white">Populating Database...</div>
                     <div className="text-[11px] text-slate-300">
-                      Executing SQL dump via native PostgreSQL engine against Neon DB. Processing types, tables, and rows...
+                      Executing SQL dump via native PostgreSQL engine against target database. Processing types, tables, and rows...
                     </div>
                   </div>
                 </div>
@@ -2592,7 +2778,7 @@ LIMIT 50;`;
                     <span>Database Successfully Populated!</span>
                   </div>
                   <div className="text-[11px] text-slate-300 font-mono">
-                    Loaded {dumpResultStatus.tablesCount || dbHealth.tables?.length || 0} tables into Neon DB in {dumpResultStatus.durationMs ? `${(dumpResultStatus.durationMs / 1000).toFixed(1)}s` : 'completed'}.
+                    Loaded {dumpResultStatus.tablesCount || dbHealth.tables?.length || 0} tables into PostgreSQL database in {dumpResultStatus.durationMs ? `${(dumpResultStatus.durationMs / 1000).toFixed(1)}s` : 'completed'}.
                   </div>
                 </div>
               ) : dumpResultStatus?.success === false ? (
@@ -2635,7 +2821,7 @@ LIMIT 50;`;
                     ) : (
                       <Play className="w-4 h-4 fill-current text-white" />
                     )}
-                    <span>{isPopulatingDb ? 'Populating Neon DB...' : 'Populate Database'}</span>
+                    <span>{isPopulatingDb ? 'Populating Database...' : 'Populate Database'}</span>
                   </button>
                 ) : (
                   <button

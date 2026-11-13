@@ -4,7 +4,7 @@ import {
   maskConnectionString, 
   saveConnectionStringToEnv, 
   removeConnectionStringFromEnv, 
-  checkNeonHealth 
+  checkDbHealth 
 } from '@/lib/db';
 
 export async function GET() {
@@ -35,12 +35,12 @@ export async function POST(req: NextRequest) {
     }
 
     // Verify connection health first
-    const testResult = await checkNeonHealth(connectionString);
+    const testResult = await checkDbHealth(connectionString);
     if (!testResult.connected) {
       return NextResponse.json(
         {
           success: false,
-          error: testResult.error || 'Connection failed. Please verify your Neon host, username, and password.',
+          error: testResult.error || 'Connection failed. Please verify your PostgreSQL host, port, username, and password.',
           latencyMs: testResult.latencyMs
         },
         { status: 400 }
@@ -52,10 +52,11 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      message: 'Neon database connected and saved successfully.',
+      message: 'PostgreSQL database connected and saved successfully.',
       database: testResult.database,
       version: testResult.version,
       host: testResult.host,
+      provider: testResult.provider,
       maskedUrl: testResult.maskedUrl,
       latencyMs: testResult.latencyMs,
       tables: testResult.tables || []

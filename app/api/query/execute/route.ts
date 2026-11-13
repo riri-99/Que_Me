@@ -6,7 +6,7 @@ import os from 'os';
 import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
 
-export const maxDuration = 300;
+export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
   const contentType = req.headers.get('content-type') || '';

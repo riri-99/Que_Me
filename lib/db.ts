@@ -1,4 +1,4 @@
-import { neon, Pool } from '@neondatabase/serverless';
+import { Pool, PoolConfig } from 'pg';
 import fs from 'fs';
 import path from 'path';
 import { execFile } from 'child_process';
@@ -16,6 +16,9 @@ export function getConnectionString(): string | null {
   }
   if (process.env.DATABASE_URL && process.env.DATABASE_URL.trim()) {
     return process.env.DATABASE_URL.trim();
+  }
+  if (process.env.POSTGRES_URL && process.env.POSTGRES_URL.trim()) {
+    return process.env.POSTGRES_URL.trim();
   }
   if (process.env.NEON_DATABASE_URL && process.env.NEON_DATABASE_URL.trim()) {
     return process.env.NEON_DATABASE_URL.trim();
@@ -59,11 +62,11 @@ export function saveConnectionStringToEnv(conn: string) {
         content += `\nDATABASE_URL="${trimmed}"\n`;
       }
     } else {
-      content = `# Neon PostgreSQL Connection\nDATABASE_URL="${trimmed}"\n`;
+      content = `# PostgreSQL Connection\nDATABASE_URL="${trimmed}"\n`;
     }
     fs.writeFileSync(envPath, content, 'utf8');
-  } catch (err) {
-    console.error('Failed to write .env.local:', err);
+  } catch {
+    // Read-only filesystem on serverless platforms (Vercel/AWS Lambda) - connection is safely passed in requests
   }
 }
 
@@ -76,17 +79,67 @@ export function removeConnectionStringFromEnv() {
       content = content.replace(/DATABASE_URL=.*/g, '');
       fs.writeFileSync(envPath, content, 'utf8');
     }
-  } catch (err) {
-    console.error('Failed to update .env.local:', err);
+  } catch {
+    // Read-only filesystem on serverless platforms
+  }
+}
+
+export function getPoolConfig(connectionString: string): PoolConfig {
+  let isLocal = false;
+  try {
+    const url = new URL(connectionString);
+    if (
+      url.hostname === 'localhost' ||
+      url.hostname === '127.0.0.1' ||
+      url.hostname === '::1' ||
+      url.hostname.endsWith('.local')
+    ) {
+      isLocal = true;
+    }
+  } catch {
+    // ignore URL parse errors
+  }
+
+  const hasSslRequire = /sslmode=(require|verify-full|verify-ca)/i.test(connectionString);
+  const hasSslDisable = /sslmode=disable/i.test(connectionString);
+
+  if (hasSslDisable || (isLocal && !hasSslRequire)) {
+    return {
+      connectionString,
+      connectionTimeoutMillis: 10000
+    };
+  }
+
+  return {
+    connectionString,
+    ssl: { rejectUnauthorized: false },
+    connectionTimeoutMillis: 15000
+  };
+}
+
+export function detectDbProvider(connectionString: string): string {
+  try {
+    const url = new URL(connectionString);
+    const host = url.hostname.toLowerCase();
+    if (host.includes('neon.tech')) return 'Neon PostgreSQL';
+    if (host.includes('supabase.co') || host.includes('supabase.com')) return 'Supabase PostgreSQL';
+    if (host.includes('rds.amazonaws.com')) return 'AWS RDS PostgreSQL';
+    if (host.includes('gcp') || host.includes('cloudsql')) return 'GCP Cloud SQL';
+    if (host.includes('railway')) return 'Railway PostgreSQL';
+    if (host.includes('render.com')) return 'Render PostgreSQL';
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return 'Local PostgreSQL';
+    return 'PostgreSQL Database';
+  } catch {
+    return 'PostgreSQL Database';
   }
 }
 
 export function getDbClient(overrideConn?: string) {
   const conn = overrideConn?.trim() || getConnectionString();
   if (!conn) {
-    throw new Error('DATABASE_URL is not configured. Please connect your Neon database in Settings.');
+    throw new Error('DATABASE_URL is not configured. Please connect your PostgreSQL database in Settings.');
   }
-  return neon(conn, { fullResults: true });
+  return new Pool(getPoolConfig(conn));
 }
 
 export interface QueryColumnMeta {
@@ -124,22 +177,15 @@ export async function executeQuery(
   if (!conn) {
     return {
       success: false,
-      error: 'DATABASE_URL is not configured. Please connect your Neon database in Settings.'
+      error: 'DATABASE_URL is not configured. Please connect your PostgreSQL database in Settings.'
     };
   }
 
   const startTime = performance.now();
+  let pool: Pool | null = null;
   try {
-    let rawResult: any;
-
-    // Use Pool for transaction support (BEGIN; ...; ROLLBACK;) and multi-statement queries
-    const pool = new Pool({ connectionString: conn });
-    try {
-      rawResult = await pool.query(trimmedSql);
-    } finally {
-      await pool.end();
-    }
-
+    pool = new Pool(getPoolConfig(conn));
+    const rawResult: any = await pool.query(trimmedSql);
     const duration = Math.round((performance.now() - startTime) * 10) / 10;
 
     // When multi-statement (e.g. BEGIN; <user-query>; ROLLBACK;):
@@ -181,6 +227,10 @@ export async function executeQuery(
       hint: err.hint,
       executionTimeMs: duration
     };
+  } finally {
+    if (pool) {
+      await pool.end().catch(() => {});
+    }
   }
 }
 
@@ -203,13 +253,22 @@ export async function executeSqlDump(
     return { success: false, error: 'SQL dump file is empty.' };
   }
 
+  const conn = overrideConn?.trim() || getConnectionString();
+  if (!conn) {
+    return {
+      success: false,
+      error: 'DATABASE_URL is not configured. Please connect your PostgreSQL database first.'
+    };
+  }
+
   const startTime = performance.now();
+  let pool: Pool | null = null;
   try {
-    const client = getDbClient(overrideConn);
-    await client.query(trimmed);
+    pool = new Pool(getPoolConfig(conn));
+    await pool.query(trimmed);
     const duration = Math.round((performance.now() - startTime) * 10) / 10;
 
-    const health = await checkNeonHealth(overrideConn);
+    const health = await checkDbHealth(overrideConn);
 
     const stmts = trimmed
       .split(';')
@@ -231,6 +290,10 @@ export async function executeSqlDump(
       detail: err.detail,
       executionTimeMs: duration
     };
+  } finally {
+    if (pool) {
+      await pool.end().catch(() => {});
+    }
   }
 }
 
@@ -251,7 +314,7 @@ export async function executeDumpFile(
   if (!conn) {
     return {
       success: false,
-      error: 'No Neon connection string configured. Please connect your Neon DB first.'
+      error: 'No PostgreSQL connection string configured. Please connect your database first.'
     };
   }
 
@@ -283,7 +346,7 @@ export async function executeDumpFile(
       },
       async (err, stdout, stderr) => {
         const duration = Math.round((performance.now() - startTime) * 10) / 10;
-        const health = await checkNeonHealth(conn);
+        const health = await checkDbHealth(conn);
         const outputSummary = (stdout || '').slice(-2000);
 
         if (err && (!health.tables || health.tables.length === 0)) {
@@ -317,13 +380,14 @@ export interface HealthCheckResult {
   database?: string;
   version?: string;
   host?: string;
+  provider?: string;
   maskedUrl?: string;
   latencyMs?: number;
   tables?: NeonTableInfo[];
   error?: string;
 }
 
-export async function checkNeonHealth(overrideConn?: string): Promise<HealthCheckResult> {
+export async function checkDbHealth(overrideConn?: string): Promise<HealthCheckResult> {
   const conn = overrideConn?.trim() || getConnectionString();
   if (!conn) {
     return {
@@ -334,13 +398,14 @@ export async function checkNeonHealth(overrideConn?: string): Promise<HealthChec
   }
 
   const startTime = performance.now();
+  let pool: Pool | null = null;
   try {
-    const client = neon(conn, { fullResults: true });
-    const res: any = await client.query('SELECT current_database() as database, version(), now() as server_time;');
+    pool = new Pool(getPoolConfig(conn));
+    const res: any = await pool.query('SELECT current_database() as database, version(), now() as server_time;');
     const latency = Math.round((performance.now() - startTime) * 10) / 10;
     const row = res?.rows?.[0] || {};
 
-    let host = 'Neon PostgreSQL';
+    let host = 'PostgreSQL Database';
     try {
       const parsed = new URL(conn);
       host = parsed.host;
@@ -348,10 +413,12 @@ export async function checkNeonHealth(overrideConn?: string): Promise<HealthChec
       // ignore
     }
 
-    // Fetch tables from public schema in Neon
+    const provider = detectDbProvider(conn);
+
+    // Fetch tables from public schema in PostgreSQL
     let tables: NeonTableInfo[] = [];
     try {
-      const tableRes: any = await client.query(`
+      const tableRes: any = await pool.query(`
         SELECT 
           c.relname AS table_name,
           c.reltuples::bigint AS estimated_count
@@ -376,9 +443,10 @@ export async function checkNeonHealth(overrideConn?: string): Promise<HealthChec
 
     return {
       connected: true,
-      database: row.database || 'neondb',
+      database: row.database || 'postgres',
       version: row.version ? row.version.split(' on ')[0] : 'PostgreSQL 16+',
       host,
+      provider,
       maskedUrl: maskConnectionString(conn),
       latencyMs: latency,
       tables
@@ -391,5 +459,11 @@ export async function checkNeonHealth(overrideConn?: string): Promise<HealthChec
       latencyMs: latency,
       error: err.message || 'Connection test failed.'
     };
+  } finally {
+    if (pool) {
+      await pool.end().catch(() => {});
+    }
   }
 }
+
+export const checkNeonHealth = checkDbHealth;
