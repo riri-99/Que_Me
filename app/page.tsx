@@ -120,6 +120,7 @@ export default function DashboardPage() {
     isLargeFile?: boolean;
   } | null>(null);
   const [isPopulatingDb, setIsPopulatingDb] = useState<boolean>(false);
+  const [isWipingDb, setIsWipingDb] = useState<boolean>(false);
   const [dumpResultStatus, setDumpResultStatus] = useState<{
     success?: boolean;
     message?: string;
@@ -186,6 +187,12 @@ export default function DashboardPage() {
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [copiedResultJson, setCopiedResultJson] = useState<boolean>(false);
   const [tableBoxHeight, setTableBoxHeight] = useState<'standard' | 'tall'>('standard');
+
+  // Split View & Interactive Draggable Resizer States
+  const [splitPercent, setSplitPercent] = useState<number>(50);
+  const [isDraggingSplitter, setIsDraggingSplitter] = useState<boolean>(false);
+  const [isDesktop, setIsDesktop] = useState<boolean>(true);
+  const splitContainerRef = useRef<HTMLDivElement>(null);
 
   // Timer Ref
   const execTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -288,6 +295,84 @@ export default function DashboardPage() {
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  // Responsive desktop detection for full-screen layout
+  useEffect(() => {
+    const updateDesktop = () => setIsDesktop(window.innerWidth >= 1024);
+    updateDesktop();
+    window.addEventListener('resize', updateDesktop);
+    return () => window.removeEventListener('resize', updateDesktop);
+  }, []);
+
+  // Split view percentage persistence (default 50:50 equal share)
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('que_me_editor_split_pct');
+      if (saved) {
+        const val = parseFloat(saved);
+        if (!isNaN(val) && val >= 15 && val <= 85) {
+          setSplitPercent(val);
+        }
+      }
+    } catch {}
+  }, []);
+
+  // Splitter Drag Mouse/Touch Event Handlers
+  useEffect(() => {
+    if (!isDraggingSplitter) return;
+
+    const handlePointerMove = (clientY: number) => {
+      if (!splitContainerRef.current) return;
+      const rect = splitContainerRef.current.getBoundingClientRect();
+      if (rect.height <= 0) return;
+      const offsetY = clientY - rect.top;
+      const newPercent = (offsetY / rect.height) * 100;
+      // Clamp between 15% and 85% to maintain usability of both editor and result box
+      const clamped = Math.min(Math.max(newPercent, 15), 85);
+      setSplitPercent(clamped);
+    };
+
+    const handleMouseMove = (e: MouseEvent) => {
+      handlePointerMove(e.clientY);
+    };
+
+    const handleTouchMove = (e: TouchEvent) => {
+      if (e.touches && e.touches.length > 0) {
+        handlePointerMove(e.touches[0].clientY);
+      }
+    };
+
+    const handlePointerUp = () => {
+      setIsDraggingSplitter(false);
+      setSplitPercent((curr) => {
+        try {
+          localStorage.setItem('que_me_editor_split_pct', String(Math.round(curr)));
+        } catch {}
+        return curr;
+      });
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handlePointerUp);
+    window.addEventListener('touchmove', handleTouchMove, { passive: true });
+    window.addEventListener('touchend', handlePointerUp);
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handlePointerUp);
+      window.removeEventListener('touchmove', handleTouchMove);
+      window.removeEventListener('touchend', handlePointerUp);
+    };
+  }, [isDraggingSplitter]);
+
+  const handleSplitterMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsDraggingSplitter(true);
+  };
+
+  const handleSplitterTouchStart = () => {
+    setIsDraggingSplitter(true);
+  };
 
   // -------------------------------------------------------------
   // Active Template / Custom Script Resolution
@@ -533,12 +618,55 @@ export default function DashboardPage() {
     }
   };
 
+  // Wipe database completely clean (drops all tables, views, enums in public schema)
+  const handleWipeDatabase = async () => {
+    if (isWipingDb || isPopulatingDb) return;
+    if (!confirm('Are you sure you want to completely wipe all tables, views, and data from this database? This will clear the schema to 0 tables.')) {
+      return;
+    }
+
+    setIsWipingDb(true);
+    try {
+      const connToSend = activeConnUrl || (typeof window !== 'undefined' ? localStorage.getItem('que_me_db_connection_url') : null) || undefined;
+      const res = await fetch('/api/db/wipe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ connectionString: connToSend })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setScriptSaveToast('Database wiped clean! 0 tables.');
+        setTimeout(() => setScriptSaveToast(''), 4000);
+        await fetchDbHealth();
+      } else {
+        alert(data.error || 'Failed to wipe database.');
+      }
+    } catch (err: any) {
+      alert(err.message || 'Error wiping database.');
+    } finally {
+      setIsWipingDb(false);
+    }
+  };
+
   // Populate Neon DB with the chosen .sql dump file
   const handlePopulateDatabaseWithDump = async () => {
     if ((!selectedDumpFile && !localDumpPathInput.trim()) || isPopulatingDb) return;
 
     if (!dbHealth.connected) {
       setIsConnModalOpen(true);
+      return;
+    }
+
+    // Check 4.5MB payload limit (disable web upload for files > 4.5 MB)
+    if (!localDumpPathInput.trim() && selectedDumpFile && selectedDumpFile.size > 4.5 * 1024 * 1024) {
+      setDumpResultStatus({
+        success: false,
+        message: `Web Populate Disabled (> 4.5 MB):\n\n` +
+          `This dump file is ${(selectedDumpFile.size / (1024 * 1024)).toFixed(1)} MB. Files larger than 4.5 MB exceed web platform upload limits.\n\n` +
+          `How to populate this dump:\n` +
+          `1. Click "Wipe Database Clean" above to reset the database to 0 tables.\n` +
+          `2. Click "Copy psql Command" and run it in PowerShell/Terminal where your file is located.`
+      });
       return;
     }
 
@@ -1213,6 +1341,7 @@ LIMIT 50;`;
     setLocalDumpPathInput('');
     setDumpResultStatus(null);
     setTableBoxHeight('standard');
+    setSplitPercent(50);
     // setShowFindReplace(false);
     setViewMode('editor');
 
@@ -1240,13 +1369,13 @@ LIMIT 50;`;
 
 
   return (
-    <div className="flex flex-col min-h-screen">
+    <div className="flex flex-col h-screen max-h-screen overflow-hidden bg-slate-950">
       {/* -------------------------------------------------------------
           TOP BAR: INTEGRATED STUDIO CONTROLS
       ------------------------------------------------------------- */}
       <header 
-        style={{ minHeight: '76px', paddingTop: '4px', paddingBottom: '4px' }}
-        className="border-b border-slate-800 bg-slate-900/95 backdrop-blur sticky top-0 z-40 w-full px-3.5 sm:px-6 xl:px-8 py-2.5 flex flex-col justify-center shadow-lg"
+        style={{ minHeight: '68px', paddingTop: '4px', paddingBottom: '4px' }}
+        className="border-b border-slate-800 bg-slate-900/95 backdrop-blur shrink-0 z-40 w-full px-3.5 sm:px-6 xl:px-8 py-2 flex flex-col justify-center shadow-lg"
       >
         <div className="w-full flex flex-col md:flex-row md:items-center justify-between gap-3 sm:gap-4">
           
@@ -1521,14 +1650,14 @@ LIMIT 50;`;
       {/* -------------------------------------------------------------
           MAIN APPLICATION VIEWPORT
       ------------------------------------------------------------- */}
-      <main className="flex-1 w-full max-w-[1920px] mx-auto px-3.5 sm:px-6 py-3.5 sm:py-4 flex flex-col">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 flex-1 items-stretch">
+      <main className="flex-1 min-h-0 w-full max-w-[1920px] mx-auto px-3.5 sm:px-6 py-2 sm:py-2.5 flex flex-col overflow-y-auto lg:overflow-hidden">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 sm:gap-4 flex-1 min-h-0 items-stretch">
           
           {/* =========================================================
               LEFT PANEL: TABLES EXPLORER & DUMP CONTEXT / USE CASE GUIDE
           ========================================================= */}
-          <div className="lg:col-span-4 xl:col-span-4 flex flex-col">
-            <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg flex flex-col h-[580px] sm:h-[640px] lg:h-[calc(100vh-130px)] lg:max-h-[820px]">
+          <div className="lg:col-span-4 xl:col-span-4 flex flex-col min-h-0 h-[480px] lg:h-full">
+            <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg flex flex-col min-h-0 h-full">
               
               {/* Header / Toolbar Panel: ONLY Dump SQL File */}
               <div className="border-b border-slate-800 bg-slate-950/80 px-3.5 sm:px-4 py-2.5 flex items-center justify-between gap-2 shrink-0">
@@ -1546,8 +1675,23 @@ LIMIT 50;`;
                   )}
                 </div>
 
-                {/* Only this one thing for the toolbar: Dump SQL File */}
+                {/* Toolbar: Wipe Data & Dump SQL File */}
                 <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleWipeDatabase}
+                    disabled={isWipingDb || isPopulatingDb || !dbHealth.connected}
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-900 hover:bg-rose-950/60 border border-slate-800 hover:border-rose-500/50 text-slate-300 hover:text-rose-200 text-xs font-semibold transition-all active:scale-95 disabled:opacity-40"
+                    title="Wipe database clean (drops all tables, views, and data in public schema)"
+                  >
+                    {isWipingDb ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-rose-400" />
+                    ) : (
+                      <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                    )}
+                    <span>{isWipingDb ? 'Wiping...' : 'Wipe Data'}</span>
+                  </button>
+
                   <input
                     type="file"
                     ref={dumpFileInputRef}
@@ -1706,15 +1850,25 @@ LIMIT 50;`;
               TOP CARD: SELECTED TABLES WRITE A QUERY (SQL EDITOR)
               BOTTOM CARD: DEDICATED RESULT BOX (LIVE RESULTS)
           ========================================================= */}
-          <div className="lg:col-span-8 xl:col-span-8 flex flex-col gap-4">
+          <div 
+            ref={splitContainerRef}
+            className={`lg:col-span-8 xl:col-span-8 flex flex-col min-h-0 h-full relative ${
+              isDraggingSplitter ? 'select-none' : ''
+            }`}
+          >
             
             {/* -------------------------------------------------------
                 TOP CARD: "Selected tables write a query" (SQL Editor)
             ------------------------------------------------------- */}
-            <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg flex flex-col">
+            <div 
+              className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg flex flex-col min-h-0 shrink-0"
+              style={{
+                height: isDesktop ? `calc(${splitPercent}% - 7px)` : '400px'
+              }}
+            >
               
               {/* Header: Query Editor Actions & Statement Badge */}
-              <div className="border-b border-slate-800 bg-slate-950/80 px-3.5 sm:px-4 py-2.5 flex flex-wrap items-center justify-between gap-2.5">
+              <div className="border-b border-slate-800 bg-slate-950/80 px-3.5 sm:px-4 py-2.5 flex flex-wrap items-center justify-between gap-2.5 shrink-0">
                 <div className="flex flex-wrap items-center gap-2 sm:gap-2.5">
                   <div className="flex items-center gap-1.5 text-xs font-bold text-slate-200 font-mono tracking-tight mr-1">
                     <Terminal className="w-4 h-4 text-indigo-400" />
@@ -1840,10 +1994,10 @@ LIMIT 50;`;
               </div>
 
               {/* Editor / Preview Body with Fully Editable BEGIN; and ROLLBACK; */}
-              <div className="flex flex-col bg-slate-950 overflow-hidden">
-                {/* Middle Editable / Preview Query Area (Expanded Vertical Height) */}
+              <div className="flex-1 min-h-0 flex flex-col bg-slate-950 overflow-hidden">
+                {/* Middle Editable / Preview Query Area */}
                 {viewMode === 'editor' ? (
-                  <div className="flex relative bg-slate-950 h-[480px] sm:h-[560px] lg:h-[620px] overflow-hidden">
+                  <div className="flex-1 min-h-0 flex relative bg-slate-950 overflow-hidden">
                     {/* Line Numbers Gutter */}
                     <div
                       ref={lineNumbersRef}
@@ -1870,12 +2024,12 @@ LIMIT 50;`;
                       spellCheck={false}
                       wrap="off"
                       placeholder="-- Write the query here"
-                      className="flex-1 bg-transparent p-2 font-mono text-xs sm:text-[13px] leading-[22px] text-slate-100 placeholder-slate-600 focus:outline-none resize-none overflow-auto custom-scrollbar selection:bg-indigo-600 selection:text-white"
+                      className="flex-1 min-h-0 bg-transparent p-2 font-mono text-xs sm:text-[13px] leading-[22px] text-slate-100 placeholder-slate-600 focus:outline-none resize-none overflow-auto custom-scrollbar selection:bg-indigo-600 selection:text-white"
                       style={{ tabSize: 2 }}
                     />
                   </div>
                 ) : (
-                  <div className="relative bg-slate-950 p-2 font-mono text-xs sm:text-[13px] leading-relaxed overflow-auto custom-scrollbar h-[480px] sm:h-[560px] lg:h-[620px] text-slate-100 selection:bg-indigo-600 selection:text-white">
+                  <div className="flex-1 min-h-0 relative bg-slate-950 p-2 font-mono text-xs sm:text-[13px] leading-relaxed overflow-auto custom-scrollbar text-slate-100 selection:bg-indigo-600 selection:text-white">
                     <pre className="whitespace-pre">
                       {(editorSql || 'BEGIN;\n\n-- Write the query here\n\nROLLBACK;\n').split('\n').map((line, idx) => (
                         <div key={idx} className="table-row">
@@ -1893,7 +2047,7 @@ LIMIT 50;`;
               </div>
 
               {/* Editor Sub-Status Bar */}
-              <div className="border-t border-slate-800/80 bg-slate-950 px-3.5 py-1.5 flex items-center justify-between text-[10px] sm:text-[11px] text-slate-500 font-mono">
+              <div className="border-t border-slate-800/80 bg-slate-950 px-3.5 py-1.5 flex items-center justify-between text-[10px] sm:text-[11px] text-slate-500 font-mono shrink-0">
                 <div className="flex items-center gap-2.5">
                   <span>{editorSql.split('\n').length} lines</span>
                   <span>•</span>
@@ -1916,9 +2070,53 @@ LIMIT 50;`;
             </div>
 
             {/* -------------------------------------------------------
+                DRAG RESIZE SPLITTER HANDLE (Interactive Height Controller)
+            ------------------------------------------------------- */}
+            <div
+              role="separator"
+              aria-orientation="horizontal"
+              aria-valuenow={Math.round(splitPercent)}
+              onMouseDown={handleSplitterMouseDown}
+              onTouchStart={handleSplitterTouchStart}
+              onDoubleClick={() => setSplitPercent(50)}
+              className={`h-3.5 shrink-0 flex items-center justify-center cursor-row-resize select-none group relative transition-colors ${
+                isDraggingSplitter ? 'cursor-row-resize' : ''
+              }`}
+              title="Drag up or down to resize Query Editor and Result Box (Double-click to reset 50/50)"
+            >
+              {/* Divider Line */}
+              <div 
+                className={`w-full h-[1px] transition-colors ${
+                  isDraggingSplitter ? 'bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.5)]' : 'bg-slate-800 group-hover:bg-indigo-500/80'
+                }`} 
+              />
+              
+              {/* Drag Handle Grip Pill */}
+              <div 
+                className={`absolute px-2.5 py-0.5 rounded-full border flex items-center gap-1 transition-all shadow-sm ${
+                  isDraggingSplitter 
+                    ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300 w-24 justify-center shadow-[0_0_12px_rgba(34,211,238,0.3)] ring-1 ring-cyan-400/50' 
+                    : 'bg-slate-800 border-slate-700/90 text-slate-400 group-hover:bg-slate-700 group-hover:border-indigo-500/60 group-hover:text-slate-200 group-hover:w-20 group-hover:shadow-[0_0_8px_rgba(99,102,241,0.3)]'
+                }`}
+              >
+                <div className="w-1 h-1 rounded-full bg-current opacity-70" />
+                <div className="w-1 h-1 rounded-full bg-current opacity-90" />
+                <div className="w-1 h-1 rounded-full bg-current opacity-70" />
+                <span className="text-[9px] font-mono tracking-wider ml-1 hidden group-hover:inline opacity-80">
+                  {Math.round(splitPercent)}%
+                </span>
+              </div>
+            </div>
+
+            {/* -------------------------------------------------------
                 BOTTOM CARD: DEDICATED "RESULT BOX" (LIVE QUERY OUTPUT)
             ------------------------------------------------------- */}
-            <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg flex flex-col">
+            <div 
+              className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden shadow-lg flex flex-col min-h-0 shrink-0"
+              style={{
+                height: isDesktop ? `calc(${100 - splitPercent}% - 7px)` : '440px'
+              }}
+            >
               
               {/* Header: Result Box Title & Viewport Controls */}
               <div className="border-b border-slate-800 bg-slate-950/80 px-3.5 sm:px-4 py-2.5 flex flex-wrap items-center justify-between gap-2.5 shrink-0">
@@ -1968,24 +2166,39 @@ LIMIT 50;`;
                       )}
                     </div>
 
-                    {/* Table Box Height Selector: Standard vs Tall */}
+                    {/* Split View Quick Presets */}
                     <div className="hidden sm:flex items-center gap-1 bg-slate-900 border border-slate-800 rounded-lg p-0.5 text-[11px] font-mono">
-                      <span className="text-slate-500 px-1 text-[10px] uppercase">Box:</span>
-                      {(['standard', 'tall'] as const).map((mode) => (
-                        <button
-                          key={mode}
-                          type="button"
-                          onClick={() => setTableBoxHeight(mode)}
-                          className={`px-2 py-0.5 rounded text-[11px] capitalize transition-colors ${
-                            tableBoxHeight === mode
-                              ? 'bg-emerald-600 text-white font-semibold'
-                              : 'text-slate-400 hover:text-slate-200'
-                          }`}
-                          title={`${mode.toUpperCase()} table box height with separate scrollbar`}
-                        >
-                          {mode === 'standard' ? 'Standard' : 'Tall'}
-                        </button>
-                      ))}
+                      <span className="text-slate-500 px-1 text-[10px] uppercase">Split:</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSplitPercent(50);
+                          setTableBoxHeight('standard');
+                        }}
+                        className={`px-2 py-0.5 rounded text-[11px] transition-colors ${
+                          Math.round(splitPercent) === 50
+                            ? 'bg-emerald-600 text-white font-semibold'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                        title="Equal 50% / 50% vertical split"
+                      >
+                        50:50
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSplitPercent(30);
+                          setTableBoxHeight('tall');
+                        }}
+                        className={`px-2 py-0.5 rounded text-[11px] transition-colors ${
+                          Math.round(splitPercent) === 30
+                            ? 'bg-emerald-600 text-white font-semibold'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                        title="Expanded Result Box (70% Result / 30% Editor)"
+                      >
+                        Max View
+                      </button>
                     </div>
 
                     {/* Page Size Selector */}
@@ -2040,7 +2253,7 @@ LIMIT 50;`;
               </div>
 
               {/* Result Box Body Content */}
-              <div className="p-3 sm:p-4 flex flex-col bg-slate-950">
+              <div className="flex-1 min-h-0 p-3 sm:p-3.5 flex flex-col bg-slate-950 overflow-hidden">
                 {isExecuting ? (
                   /* State 1: Executing */
                   <div className="flex-1 flex flex-col items-center justify-center p-8 text-center my-auto">
@@ -2180,15 +2393,9 @@ LIMIT 50;`;
                     </div>
                   </div>
                 ) : (
-                  /* State 6: Interactive Data Table Grid (Compact Box with Separate Scrollbar) */
-                  <div className="flex flex-col min-h-0">
-                    <div
-                      className={`overflow-auto custom-scrollbar rounded-xl border border-slate-800 bg-slate-950/60 shadow-inner ${
-                        tableBoxHeight === 'tall'
-                          ? 'h-[480px] sm:h-[540px]'
-                          : 'h-[360px] sm:h-[400px]'
-                      }`}
-                    >
+                  /* State 6: Interactive Data Table Grid */
+                  <div className="flex-1 min-h-0 flex flex-col">
+                    <div className="flex-1 min-h-0 overflow-auto custom-scrollbar rounded-xl border border-slate-800 bg-slate-950/60 shadow-inner">
                       <table className="w-full text-left text-xs border-collapse">
                         <thead className="sticky top-0 bg-slate-900 border-b border-slate-800 text-slate-300 font-mono text-[11px] uppercase tracking-wider z-10 shadow-sm">
                           <tr>
@@ -2338,7 +2545,7 @@ LIMIT 50;`;
               </div>
 
               {/* Result Box Status Bar */}
-              <div className="border-t border-slate-800/80 bg-slate-950 px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-[10px] sm:text-[11px] text-slate-500 font-mono">
+              <div className="border-t border-slate-800/80 bg-slate-950 px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-[10px] sm:text-[11px] text-slate-500 font-mono shrink-0">
                 {queryResult ? (
                   <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
                     <span className="text-slate-300">DB: {dbHealth.database || 'Neon'}</span>
@@ -2372,6 +2579,14 @@ LIMIT 50;`;
 
         </div>
       </main>
+
+      {/* Full-screen invisible overlay while dragging to smoothly capture pointer events without text selection glitches */}
+      {isDraggingSplitter && (
+        <div 
+          className="fixed inset-0 z-50 cursor-row-resize select-none"
+          style={{ userSelect: 'none', cursor: 'row-resize' }}
+        />
+      )}
 
       {/* =========================================================
           SAVE AS SCRIPT / WRITE NEW SCRIPT MODAL
@@ -2708,11 +2923,9 @@ LIMIT 50;`;
                 </div>
                 <div>
                   <h3 className="text-base font-bold text-white font-heading">
-                    Populate Neon DB from SQL Dump
+                    Populate Database
                   </h3>
-                  <p className="text-xs text-slate-400">
-                    Execute your .sql dump file to build tables and load records
-                  </p>
+                  
                 </div>
               </div>
               <button
@@ -2733,27 +2946,95 @@ LIMIT 50;`;
             </div>
 
             <div className="p-5 sm:p-6 space-y-4 overflow-y-auto flex-1 text-slate-200 text-xs">
-              
-              {/* Target DB Banner */}
-              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <span className={`w-2 h-2 rounded-full ${dbHealth.connected ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'}`} />
-                  <span className="text-slate-400">Target Database:</span>
-                  <span className="font-mono text-emerald-400 font-semibold">{dbHealth.database || 'postgres'} ({dbHealth.provider || 'PostgreSQL'})</span>
-                </div>
-                <span className="font-mono text-[11px] text-slate-500 truncate max-w-[200px]">{dbHealth.host}</span>
-              </div>
 
-              {/* Clean Repopulate Guarantee Banner */}
-              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-start gap-2.5 text-xs text-amber-200">
-                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                <div className="space-y-0.5">
-                  <div className="font-semibold text-amber-300">Clean Database Wipe & Repopulate:</div>
-                  <div className="text-[11px] text-amber-200/80 leading-relaxed">
-                    All existing tables, views, custom types, and data in the database will be cleared completely first, then pristine schema and records will be repopulated from this dump file.
+              {/* Guidance: If file > 4.5 MB show Terminal Instructions; if <= 4.5 MB show Direct Platform Populating info */}
+              {(dumpFileMeta.sizeBytes || 0) > 4.5 * 1024 * 1024 ? (
+                <div className="p-4 rounded-xl bg-gradient-to-br from-indigo-950/70 via-slate-900 to-purple-950/50 border border-indigo-500/40 space-y-3.5 text-xs shadow-lg">
+                  <div className="flex items-start gap-2.5">
+                    <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                    <div className="space-y-1">
+                      <div className="font-semibold text-white flex items-center gap-2">
+                        <span>File Exceeds Web Limit ({dumpFileMeta.size} &gt; 4.5 MB)</span>
+                       
+                      </div>
+                      <div className="text-[11px] text-slate-300 leading-relaxed">
+                        Populate Disabled &bull; Terminal Restore Required
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Step 1: Wipe Existing Database */}
+                  <div className="p-3 rounded-xl bg-slate-950/90 border border-slate-800 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="w-5 h-5 rounded-full bg-rose-500/20 text-rose-300 flex items-center justify-center font-bold text-[11px] border border-rose-500/30">1</span>
+                        <span className="font-semibold text-slate-200 text-xs">Wipe Existing Database</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleWipeDatabase}
+                        disabled={isWipingDb || isPopulatingDb}
+                        className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-semibold text-xs transition-colors flex items-center gap-1.5 shadow-sm disabled:opacity-40"
+                      >
+                        {isWipingDb ? <Loader2 className="w-3.5 h-3.5 animate-spin text-white" /> : <Trash2 className="w-3.5 h-3.5 text-white" />}
+                        <span>{isWipingDb ? 'Wiping Database...' : 'Wipe Database'}</span>
+                      </button>
+                    </div>
+                   
+                  </div>
+
+                  {/* Step 2: Native Restore Command */}
+                  <div className="p-3 rounded-xl bg-slate-950/90 border border-slate-800 space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-300 flex items-center justify-center font-bold text-[11px] border border-indigo-500/30">2</span>
+                        <span className="font-semibold text-slate-200 text-xs">Run Restore Command</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const conn = activeConnUrl || (typeof window !== 'undefined' ? localStorage.getItem('que_me_db_connection_url') : '') || '';
+                          const cmd = `psql "${conn}" -f "${dumpFileMeta.name}"`;
+                          navigator.clipboard.writeText(cmd);
+                          setScriptSaveToast('psql command copied to clipboard!');
+                          setTimeout(() => setScriptSaveToast(''), 3500);
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition-colors flex items-center gap-1.5 shadow-sm active:scale-95"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Copy</span>
+                      </button>
+                    </div>
+
+                    <div className="bg-slate-900 border border-slate-800 rounded-lg p-2.5 font-mono text-[11px] text-cyan-300 break-all select-all">
+                      psql "{activeConnUrl || 'postgresql://...'}" -f "{dumpFileMeta.name}"
+                    </div>
+
+                    <div className="text-[11px] text-slate-400 pl-7 space-y-1">
+                      <p>
+                        Open <strong>PowerShell</strong> or <strong>Terminal</strong> in your folder where <code className="text-slate-200 bg-slate-800 px-1 py-0.5 rounded">{dumpFileMeta.name}</code> is saved, paste, and press Enter.
+                      </p>
+                      
+                    </div>
                   </div>
                 </div>
-              </div>
+              ) : (
+                /* File <= 4.5 MB: Direct Platform Dump Enabled */
+                <div className="p-3.5 rounded-xl bg-emerald-950/40 border border-emerald-500/30 flex items-center gap-3 text-xs">
+                  <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+                  <div>
+                    <div className="font-semibold text-emerald-300 flex items-center gap-2">
+                      <span>Direct Platform Dump Enabled</span>
+                      <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono text-[10px]">
+                        {dumpFileMeta.size} &le; 4.5 MB
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-slate-300">
+                      This file is under 4.5 MB. Click &quot;Populate Database&quot; below to wipe the database clean and repopulate it directly through the web platform.
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Dump File Metadata Card */}
               <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-3.5 space-y-2.5">
@@ -2766,29 +3047,18 @@ LIMIT 50;`;
                     <span className="text-slate-400 px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-[11px]">
                       {dumpFileMeta.size}
                     </span>
-                    <span className="text-emerald-400 px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/30 text-[10px] font-mono font-semibold">
-                      psql Native
-                    </span>
+                    
                   </div>
                 </div>
 
-                <div className="text-[11px] font-mono text-slate-400 pt-1 border-t border-slate-800/80 flex items-center justify-between">
-                  <span className="text-slate-500 text-[10px] uppercase">Execution Mode:</span>
-                  <span className="text-cyan-300 font-semibold">Zero-Heap Streaming (OOM Safe)</span>
-                </div>
 
                 {/* Local file path option for instant zero-upload speed */}
                 <div className="pt-2 border-t border-slate-800/80">
                   <div className="flex items-center justify-between mb-1">
                     <label className="text-[10px] uppercase tracking-wider text-slate-400 font-mono">
-                      Local Path (skip HTTP upload for instant execution):
+                      Local Path:
                     </label>
-                    {localDumpPathInput && (
-                      <span className="text-[10px] text-emerald-400 font-mono flex items-center gap-1">
-                        <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                        Found on disk
-                      </span>
-                    )}
+                    
                   </div>
                   <input
                     type="text"
@@ -2797,18 +3067,13 @@ LIMIT 50;`;
                     placeholder="e.g. C:\Users\Srishika\Downloads\dump-production-202611121626.sql"
                     className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 font-mono focus:outline-none focus:border-cyan-500"
                   />
-                  {localDumpPathInput && (
-                    <div className="text-[10px] text-emerald-400/90 font-mono mt-1 flex items-center gap-1">
-                      <Zap className="w-3 h-3 text-emerald-400 shrink-0" />
-                      <span>Instant direct execution enabled (0 MB HTTP upload overhead)</span>
-                    </div>
-                  )}
+                  
                 </div>
 
                 {/* Code Preview */}
                 <div>
                   <span className="text-[10px] uppercase tracking-wider text-slate-500 font-mono block mb-1">
-                    Dump File Preview (First 15 lines):
+                    File Preview (First 15 lines):
                   </span>
                   <pre className="bg-slate-900/90 rounded-lg p-2.5 font-mono text-[11px] text-slate-300 border border-slate-800 overflow-x-auto max-h-28 text-left leading-relaxed">
                     {dumpFileMeta.preview}
@@ -2822,9 +3087,7 @@ LIMIT 50;`;
                   <Loader2 className="w-5 h-5 animate-spin text-cyan-400 shrink-0" />
                   <div>
                     <div className="font-semibold text-white">Clearing Database & Populating...</div>
-                    <div className="text-[11px] text-slate-300">
-                      Clearing all existing tables and data, then streaming SQL dump via native PostgreSQL engine. Please wait...
-                    </div>
+                    
                   </div>
                 </div>
               ) : dumpResultStatus?.success ? (
@@ -2866,19 +3129,48 @@ LIMIT 50;`;
                 </button>
 
                 {!dumpResultStatus?.success ? (
-                  <button
-                    type="button"
-                    onClick={handlePopulateDatabaseWithDump}
-                    disabled={isPopulatingDb || !dbHealth.connected}
-                    className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold text-xs shadow-md transition-all active:scale-95 disabled:opacity-40"
-                  >
-                    {isPopulatingDb ? (
-                      <Loader2 className="w-4 h-4 animate-spin text-white" />
-                    ) : (
-                      <Play className="w-4 h-4 fill-current text-white" />
-                    )}
-                    <span>{isPopulatingDb ? 'Populating Database...' : 'Populate Database'}</span>
-                  </button>
+                  (dumpFileMeta.sizeBytes || 0) > 4.5 * 1024 * 1024 ? (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={true}
+                        className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-800 text-slate-500 text-xs font-semibold cursor-not-allowed border border-slate-700/50"
+                        title="Web populate disabled because file exceeds 4.5 MB. Please run the psql command in your terminal."
+                      >
+                        <Lock className="w-3.5 h-3.5" />
+                        <span>Populate Disabled (&gt; 4.5 MB)</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const conn = activeConnUrl || (typeof window !== 'undefined' ? localStorage.getItem('que_me_db_connection_url') : '') || '';
+                          const cmd = `psql "${conn}" -f "${dumpFileMeta.name}"`;
+                          navigator.clipboard.writeText(cmd);
+                          setScriptSaveToast('Restore command copied to clipboard!');
+                          setTimeout(() => setScriptSaveToast(''), 3500);
+                        }}
+                        className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gradient-to-r from-indigo-600 to-cyan-600 hover:from-indigo-500 hover:to-cyan-500 text-white font-semibold text-xs shadow-md transition-all active:scale-95"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Copy</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handlePopulateDatabaseWithDump}
+                      disabled={isPopulatingDb || !dbHealth.connected}
+                      className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold text-xs shadow-md transition-all active:scale-95 disabled:opacity-40"
+                    >
+                      {isPopulatingDb ? (
+                        <Loader2 className="w-4 h-4 animate-spin text-white" />
+                      ) : (
+                        <Play className="w-4 h-4 fill-current text-white" />
+                      )}
+                      <span>{isPopulatingDb ? 'Populating Database...' : 'Populate Database'}</span>
+                    </button>
+                  )
                 ) : (
                   <button
                     type="button"

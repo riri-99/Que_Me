@@ -450,6 +450,30 @@ export async function executeDumpFile(
         const outputSummary = (stdout || '').slice(-2000);
 
         if (err && (!health.tables || health.tables.length === 0)) {
+          // Fallback for Vercel/serverless environments without psql CLI:
+          // Try executing the SQL statements directly via pg Pool
+          try {
+            const rawContent = fs.readFileSync(resolvedPath, 'utf8');
+            if (!rawContent.includes('FROM stdin;')) {
+              const fallbackPool = new Pool(getPoolConfig(conn));
+              try {
+                await fallbackPool.query(rawContent);
+                const postHealth = await checkDbHealth(conn);
+                return resolve({
+                  success: true,
+                  message: `Database wiped clean and populated successfully via PostgreSQL engine! Loaded ${postHealth.tables?.length || 0} tables.`,
+                  durationMs: Math.round((performance.now() - startTime) * 10) / 10,
+                  tables: postHealth.tables || [],
+                  output: 'Executed SQL dump directly via PostgreSQL client engine.'
+                });
+              } finally {
+                await fallbackPool.end().catch(() => {});
+              }
+            }
+          } catch (fallbackErr: any) {
+            console.error('SQL direct execution fallback failed:', fallbackErr);
+          }
+
           return resolve({
             success: false,
             error: stderr || err.message || 'psql dump execution failed.',
@@ -484,6 +508,8 @@ export interface HealthCheckResult {
   maskedUrl?: string;
   latencyMs?: number;
   tables?: NeonTableInfo[];
+  isVercel?: boolean;
+  isServerless?: boolean;
   error?: string;
 }
 
@@ -514,6 +540,8 @@ export async function checkDbHealth(overrideConn?: string): Promise<HealthCheckR
     }
 
     const provider = detectDbProvider(conn);
+    const isVercel = Boolean(process.env.VERCEL || process.env.NEXT_PUBLIC_VERCEL_ENV);
+    const isServerless = isVercel || Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME);
 
     // Fetch tables from public schema in PostgreSQL
     let tables: NeonTableInfo[] = [];
@@ -549,7 +577,9 @@ export async function checkDbHealth(overrideConn?: string): Promise<HealthCheckR
       provider,
       maskedUrl: maskConnectionString(conn),
       latencyMs: latency,
-      tables
+      tables,
+      isVercel,
+      isServerless
     };
   } catch (err: any) {
     const latency = Math.round((performance.now() - startTime) * 10) / 10;
