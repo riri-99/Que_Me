@@ -6,7 +6,7 @@ import os from 'os';
 import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
 
-export const maxDuration = 60;
+export const maxDuration = 300; // 5 minutes for large dumps
 
 export async function POST(req: NextRequest) {
   const contentType = req.headers.get('content-type') || '';
@@ -19,7 +19,7 @@ export async function POST(req: NextRequest) {
       const localFilePath = (formData.get('localFilePath') as string | null)?.trim();
       const overrideConn = (formData.get('connectionString') as string | null)?.trim() || undefined;
 
-      // If localFilePath on machine is provided and valid, execute directly (0 upload time)
+      // Check if localFilePath on machine is provided and valid (0 upload time)
       if (localFilePath && fs.existsSync(localFilePath)) {
         const result = await executeDumpFile(localFilePath, overrideConn);
         return NextResponse.json(result);
@@ -30,6 +30,19 @@ export async function POST(req: NextRequest) {
           { success: false, error: 'No dump file or local file path provided.' },
           { status: 400 }
         );
+      }
+
+      // Check if this exact file exists on disk in Downloads/Desktop to avoid redundant temp buffering
+      const candidates = [
+        path.join(os.homedir(), 'Downloads', file.name),
+        path.join(os.homedir(), 'Desktop', file.name),
+        path.join(os.homedir(), 'Documents', file.name),
+        path.join(process.cwd(), file.name),
+      ];
+      const localMatch = candidates.find((c) => fs.existsSync(c));
+      if (localMatch) {
+        const result = await executeDumpFile(localMatch, overrideConn);
+        return NextResponse.json(result);
       }
 
       // Stream file directly to a temporary path on disk
@@ -71,7 +84,7 @@ export async function POST(req: NextRequest) {
     const localFilePath = body?.localFilePath?.trim();
     const isDump = Boolean(body?.isDump);
 
-    if (localFilePath && fs.existsSync(localFilePath)) {
+    if (localFilePath) {
       const result = await executeDumpFile(localFilePath, overrideConn);
       return NextResponse.json(result);
     }
@@ -85,11 +98,11 @@ export async function POST(req: NextRequest) {
 
     if (isDump) {
       const dumpResult = await executeSqlDump(sql, overrideConn);
-      return NextResponse.json(dumpResult, { status: dumpResult.success ? 200 : 200 });
+      return NextResponse.json(dumpResult, { status: 200 });
     }
 
     const result = await executeQuery(sql, overrideConn);
-    return NextResponse.json(result, { status: result.success ? 200 : 200 });
+    return NextResponse.json(result, { status: 200 });
   } catch (err: any) {
     return NextResponse.json(
       {

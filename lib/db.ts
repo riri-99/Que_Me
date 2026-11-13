@@ -1,6 +1,7 @@
 import { Pool, PoolConfig } from 'pg';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { execFile } from 'child_process';
 
 // In-memory runtime override if set via the Studio UI
@@ -234,6 +235,62 @@ export async function executeQuery(
   }
 }
 
+export async function wipeDatabase(
+  overrideConn?: string
+): Promise<{ success: boolean; error?: string }> {
+  const conn = overrideConn?.trim() || getConnectionString();
+  if (!conn) {
+    return { success: false, error: 'No database connection configured.' };
+  }
+  let pool: Pool | null = null;
+  try {
+    pool = new Pool(getPoolConfig(conn));
+    // Clear all existing data, tables, views, sequences, and enums in public schema
+    await pool.query(`
+      DO $$
+      DECLARE
+        r RECORD;
+      BEGIN
+        -- 1. Try clean schema drop & recreate
+        BEGIN
+          EXECUTE 'DROP SCHEMA IF EXISTS public CASCADE';
+          EXECUTE 'CREATE SCHEMA public';
+          EXECUTE 'GRANT ALL ON SCHEMA public TO CURRENT_USER';
+          EXECUTE 'GRANT ALL ON SCHEMA public TO PUBLIC';
+          RETURN;
+        EXCEPTION WHEN OTHERS THEN
+          NULL;
+        END;
+
+        -- 2. Fallback if schema-level drop is restricted: drop all objects in public
+        FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP
+          EXECUTE 'DROP TABLE IF EXISTS public.' || quote_ident(r.tablename) || ' CASCADE';
+        END LOOP;
+        FOR r IN (SELECT viewname FROM pg_views WHERE schemaname = 'public') LOOP
+          EXECUTE 'DROP VIEW IF EXISTS public.' || quote_ident(r.viewname) || ' CASCADE';
+        END LOOP;
+        FOR r IN (SELECT matviewname FROM pg_matviews WHERE schemaname = 'public') LOOP
+          EXECUTE 'DROP MATERIALIZED VIEW IF EXISTS public.' || quote_ident(r.matviewname) || ' CASCADE';
+        END LOOP;
+        FOR r IN (SELECT typname FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = 'public' AND t.typtype = 'e') LOOP
+          EXECUTE 'DROP TYPE IF EXISTS public.' || quote_ident(r.typname) || ' CASCADE';
+        END LOOP;
+        FOR r IN (SELECT sequencename FROM pg_sequences WHERE schemaname = 'public') LOOP
+          EXECUTE 'DROP SEQUENCE IF EXISTS public.' || quote_ident(r.sequencename) || ' CASCADE';
+        END LOOP;
+      END $$;
+    `);
+    return { success: true };
+  } catch (err: any) {
+    console.error('Failed to wipe database before dump:', err);
+    return { success: false, error: err.message || 'Failed to wipe database.' };
+  } finally {
+    if (pool) {
+      await pool.end().catch(() => {});
+    }
+  }
+}
+
 export interface DumpExecutionResult {
   success: boolean;
   statementsExecuted?: number;
@@ -258,6 +315,15 @@ export async function executeSqlDump(
     return {
       success: false,
       error: 'DATABASE_URL is not configured. Please connect your PostgreSQL database first.'
+    };
+  }
+
+  // Always wipe database cleanly before repopulating from dump
+  const wipeResult = await wipeDatabase(conn);
+  if (!wipeResult.success) {
+    return {
+      success: false,
+      error: `Failed to clear existing database before dump: ${wipeResult.error}`
     };
   }
 
@@ -318,10 +384,33 @@ export async function executeDumpFile(
     };
   }
 
-  if (!fs.existsSync(filePath)) {
+  // Resolve file path (check exact path, Downloads, Desktop, current directory)
+  let resolvedPath = filePath.trim();
+  if (!fs.existsSync(resolvedPath)) {
+    const filename = path.basename(resolvedPath);
+    const candidates = [
+      path.join(os.homedir(), 'Downloads', filename),
+      path.join(os.homedir(), 'Desktop', filename),
+      path.join(os.homedir(), 'Documents', filename),
+      path.join(process.cwd(), filename),
+    ];
+    const found = candidates.find((c) => fs.existsSync(c));
+    if (found) {
+      resolvedPath = found;
+    } else {
+      return {
+        success: false,
+        error: `Dump file not found on disk: ${filePath}`
+      };
+    }
+  }
+
+  // Always wipe database cleanly before repopulating from dump
+  const wipeResult = await wipeDatabase(conn);
+  if (!wipeResult.success) {
     return {
       success: false,
-      error: `Dump file not found on disk: ${filePath}`
+      error: `Failed to clear existing database before dump: ${wipeResult.error}`
     };
   }
 
@@ -330,15 +419,26 @@ export async function executeDumpFile(
   // Find psql executable
   let psqlCmd = 'psql';
   const progFiles = process.env['ProgramFiles'] || 'C:\\Program Files';
-  const winPsql = path.join(progFiles, 'PostgreSQL', '18', 'bin', 'psql.exe');
-  if (fs.existsSync(winPsql)) {
-    psqlCmd = winPsql;
+  const progFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+  const candidatePsqls = [
+    path.join(progFiles, 'PostgreSQL', '18', 'bin', 'psql.exe'),
+    path.join(progFiles, 'PostgreSQL', '17', 'bin', 'psql.exe'),
+    path.join(progFiles, 'PostgreSQL', '16', 'bin', 'psql.exe'),
+    path.join(progFilesX86, 'PostgreSQL', '18', 'bin', 'psql.exe'),
+    path.join(progFilesX86, 'PostgreSQL', '17', 'bin', 'psql.exe'),
+    path.join(progFilesX86, 'PostgreSQL', '16', 'bin', 'psql.exe'),
+  ];
+  for (const candidate of candidatePsqls) {
+    if (fs.existsSync(candidate)) {
+      psqlCmd = candidate;
+      break;
+    }
   }
 
   return new Promise((resolve) => {
     execFile(
       psqlCmd,
-      [conn, '-f', filePath],
+      [conn, '-f', resolvedPath],
       {
         maxBuffer: 50 * 1024 * 1024,
         env: { ...process.env, PGCLIENTENCODING: 'UTF8' },
@@ -360,7 +460,7 @@ export async function executeDumpFile(
 
         return resolve({
           success: true,
-          message: `Database populated successfully! Loaded ${health.tables?.length || 0} tables.`,
+          message: `Database wiped clean and populated successfully! Loaded ${health.tables?.length || 0} tables.`,
           durationMs: duration,
           tables: health.tables || [],
           output: outputSummary

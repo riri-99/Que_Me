@@ -513,6 +513,19 @@ export default function DashboardPage() {
       });
       setDumpResultStatus(null);
       setIsDumpModalOpen(true);
+
+      // Auto-detect local file path on disk (skip HTTP upload for instant execution)
+      try {
+        const detectRes = await fetch(`/api/query/detect-path?fileName=${encodeURIComponent(file.name)}`);
+        if (detectRes.ok) {
+          const detectData = await detectRes.json();
+          if (detectData.exists && detectData.localPath) {
+            setLocalDumpPathInput(detectData.localPath);
+          }
+        }
+      } catch {
+        // ignore detection errors
+      }
     } catch (err: any) {
       console.error('Failed to read dump file preview:', err);
     } finally {
@@ -533,28 +546,46 @@ export default function DashboardPage() {
     setDumpResultStatus(null);
 
     try {
-      const formData = new FormData();
-      if (selectedDumpFile) {
-        formData.append('dumpFile', selectedDumpFile);
-      }
-      if (localDumpPathInput.trim()) {
-        formData.append('localFilePath', localDumpPathInput.trim());
-      }
       const connToSend = activeConnUrl || (typeof window !== 'undefined' ? localStorage.getItem('que_me_db_connection_url') : null) || undefined;
-      if (connToSend) {
-        formData.append('connectionString', connToSend);
+
+      let res: Response;
+      // If a local file path is available (auto-detected or manually supplied), send lightweight JSON
+      if (localDumpPathInput.trim()) {
+        res = await fetch('/api/query/execute', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            localFilePath: localDumpPathInput.trim(),
+            connectionString: connToSend
+          })
+        });
+      } else {
+        // Fallback: send multipart form data
+        const formData = new FormData();
+        if (selectedDumpFile) {
+          formData.append('dumpFile', selectedDumpFile);
+        }
+        if (connToSend) {
+          formData.append('connectionString', connToSend);
+        }
+        res = await fetch('/api/query/execute', {
+          method: 'POST',
+          body: formData
+        });
       }
 
-      const res = await fetch('/api/query/execute', {
-        method: 'POST',
-        body: formData
-      });
-      const data = await res.json();
+      const resText = await res.text();
+      let data: any;
+      try {
+        data = JSON.parse(resText);
+      } catch {
+        throw new Error(resText.slice(0, 300) || `Server error (${res.status})`);
+      }
 
       if (data.success) {
         setDumpResultStatus({
           success: true,
-          message: data.message || 'Database successfully populated with tables and rows!',
+          message: data.message || 'Database wiped clean and successfully repopulated!',
           tablesCount: data.tables?.length || 0,
           durationMs: data.durationMs || data.executionTimeMs,
           output: data.output
@@ -2713,6 +2744,17 @@ LIMIT 50;`;
                 <span className="font-mono text-[11px] text-slate-500 truncate max-w-[200px]">{dbHealth.host}</span>
               </div>
 
+              {/* Clean Repopulate Guarantee Banner */}
+              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-start gap-2.5 text-xs text-amber-200">
+                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <div className="space-y-0.5">
+                  <div className="font-semibold text-amber-300">Clean Database Wipe & Repopulate:</div>
+                  <div className="text-[11px] text-amber-200/80 leading-relaxed">
+                    All existing tables, views, custom types, and data in the database will be cleared completely first, then pristine schema and records will be repopulated from this dump file.
+                  </div>
+                </div>
+              </div>
+
               {/* Dump File Metadata Card */}
               <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-3.5 space-y-2.5">
                 <div className="flex items-center justify-between font-mono text-xs">
@@ -2737,9 +2779,17 @@ LIMIT 50;`;
 
                 {/* Local file path option for instant zero-upload speed */}
                 <div className="pt-2 border-t border-slate-800/80">
-                  <label className="block text-[10px] uppercase tracking-wider text-slate-400 font-mono mb-1">
-                    Local Path (Optional - skip HTTP upload for instant execution):
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[10px] uppercase tracking-wider text-slate-400 font-mono">
+                      Local Path (skip HTTP upload for instant execution):
+                    </label>
+                    {localDumpPathInput && (
+                      <span className="text-[10px] text-emerald-400 font-mono flex items-center gap-1">
+                        <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                        Found on disk
+                      </span>
+                    )}
+                  </div>
                   <input
                     type="text"
                     value={localDumpPathInput}
@@ -2747,6 +2797,12 @@ LIMIT 50;`;
                     placeholder="e.g. C:\Users\Srishika\Downloads\dump-production-202611121626.sql"
                     className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white placeholder-slate-600 font-mono focus:outline-none focus:border-cyan-500"
                   />
+                  {localDumpPathInput && (
+                    <div className="text-[10px] text-emerald-400/90 font-mono mt-1 flex items-center gap-1">
+                      <Zap className="w-3 h-3 text-emerald-400 shrink-0" />
+                      <span>Instant direct execution enabled (0 MB HTTP upload overhead)</span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Code Preview */}
@@ -2765,9 +2821,9 @@ LIMIT 50;`;
                 <div className="p-3.5 rounded-xl bg-indigo-950/40 border border-indigo-500/30 flex items-center gap-3 text-xs text-indigo-200">
                   <Loader2 className="w-5 h-5 animate-spin text-cyan-400 shrink-0" />
                   <div>
-                    <div className="font-semibold text-white">Populating Database...</div>
+                    <div className="font-semibold text-white">Clearing Database & Populating...</div>
                     <div className="text-[11px] text-slate-300">
-                      Executing SQL dump via native PostgreSQL engine against target database. Processing types, tables, and rows...
+                      Clearing all existing tables and data, then streaming SQL dump via native PostgreSQL engine. Please wait...
                     </div>
                   </div>
                 </div>
@@ -2775,7 +2831,7 @@ LIMIT 50;`;
                 <div className="p-3.5 rounded-xl bg-emerald-950/40 border border-emerald-500/30 space-y-1.5 text-xs text-emerald-200">
                   <div className="flex items-center gap-2 font-semibold text-emerald-300">
                     <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                    <span>Database Successfully Populated!</span>
+                    <span>Database Successfully Wiped & Repopulated!</span>
                   </div>
                   <div className="text-[11px] text-slate-300 font-mono">
                     Loaded {dumpResultStatus.tablesCount || dbHealth.tables?.length || 0} tables into PostgreSQL database in {dumpResultStatus.durationMs ? `${(dumpResultStatus.durationMs / 1000).toFixed(1)}s` : 'completed'}.
